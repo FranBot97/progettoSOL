@@ -11,4 +11,4 @@ server.c : util.h  icl_hash.h  conn.h
   $(CC) $(CFLAGS) $(INCLUDES) $(OPTFLAGS) -o $@ $< $(LDFLAGS) $(LIBS)
 
 clean : 
-  rm -f *.o
+  rm -f *.o *~ *.a
