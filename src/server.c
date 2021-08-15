@@ -3,6 +3,6 @@
 #include <util.h>
 
 int main(){
-  
+  printf("Server in esecuzione\n");
   return 0;
 }
