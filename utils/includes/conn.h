@@ -8,9 +8,11 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
-#define SOCKNAME     "./cs_sock"
-#define MAXBACKLOG   32
+#define PATH_MAX 128            //Limite massimo per la lunghezza dei path
+#define RETRY_TIME_MS 200        //Tempo per riprovare a connettersi al server, in ms
+#define TIMEOUT_LIMIT_SEC 5    //Tempo massimo per i tentativi di connessione, in sec
 
 /** Evita letture parziali
  *
