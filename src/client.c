@@ -299,7 +299,7 @@ int main(int argc, char* argv[]){
                 break;
 
             case 't':
-                if(time_between_requests) {}; //TODO SET TIME OPTARG
+                if(waiting_time) {}; //TODO SET TIME OPTARG
                 //imposta tempo tra due richieste
                 break;
 
