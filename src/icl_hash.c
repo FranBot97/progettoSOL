@@ -16,7 +16,7 @@
 #include <string.h>
 #include <assert.h>
 
-#include "icl_hash.h"
+#include <icl_hash.h>
 
 #include <limits.h>
 
@@ -57,7 +57,6 @@ int string_compare(void* a, void* b)
 {
     return (strcmp( (char*)a, (char*)b ) == 0);
 }
-
 
 /**
  * Create a new hash table.
