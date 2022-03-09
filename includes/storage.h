@@ -32,4 +32,6 @@ file_t* storage_findFile(storage_t* storage, const char* filename);
 
 int storage_lockFile(storage_t* storage, const char* filename, int client_fd);
 
+int storage_unlockFile(storage_t* storage, const char* filename, int client_fd);
+
 #endif //NOVEMBREPROG_STORAGE_H
