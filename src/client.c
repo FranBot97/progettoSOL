@@ -59,18 +59,23 @@ int main(int argc, char* argv[]){
     }
 
     signal(SIGINT, intHandler);
+    signal(SIGPIPE, intHandler);
     signal(SIGTSTP, intHandler);
     //printf("%ld\n", timeLimit.tv_sec);
 
 
    char request[LINE_MAX];
-    if (openFile("miofile", O_CREATE) == 0)
+    strcpy(request, "quit");
+
+    if (openFile("miofile", O_CREATE | O_LOCK) == 0)
         printf("File aperto correttamente\n");
     else
         printf("Errore nell'apertura del file\n");
 
+    printf("%d\n", unlockFile("miofile"));
 
-    if (openFile("miofile1", O_CREATE) == 0)
+
+    if (openFile("miofile", 0) == 0)
         printf("File aperto correttamente\n");
     else
         printf("Errore nell'apertura del file\n");
@@ -85,8 +90,8 @@ int main(int argc, char* argv[]){
         printf("File aperto correttamente\n");
     else
         printf("Errore nell'apertura del file\n");
+    closeConnection(sockname);
 
-    strcpy(request, "quit");
     sendToServer(request, 4, "string");
 
 

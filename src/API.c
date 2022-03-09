@@ -20,7 +20,9 @@ enum  operations_ {
     openConnection_op = 0,
     openFile_simple_op = 1,
     openFile_with_CREATE_OR_LOCK_op = 2,
-    closeConnection_op = 3
+    closeConnection_op = 3,
+    lockFile_op = 4,
+    unlockFile_op = 5
 };
 enum operations_ last_op = NULL_op;
 
@@ -101,20 +103,24 @@ int closeConnection(const char* sockname){
         return -1;
     }
 
-    if (close(socket_fd) != 0 )
-        return -1;
-
     //libero tutti i file lockati dal client
     char filename[MAX_FILENAME];
     if(locked_files != NULL){
-        elem_t *pointer = locked_files->HEAD;
-        while (pointer != NULL) {
-            strncpy(filename, pointer->content, MAX_FILENAME-1);
+        while (locked_files->num_elem > 0) {
+            elem_t* toDestroy = get_head(locked_files);
+            strncpy(filename, toDestroy->content, MAX_FILENAME-1);
+            //printf("%s\n", filename);
             unlockFile(filename);
+            free(toDestroy);
+
             //aspetto responso
-            pointer = pointer->next;
+           // pointer = pointer->next;
         }
     }
+
+    if (close(socket_fd) != 0 )
+        return -1;
+
     reset();
     return 0;
 }
@@ -165,16 +171,11 @@ int openFile(const char* pathname, int flags){
     }
 
     //Aspetto risposta
-    char* response = recieveFromServer("string");
+    char* response = recieveFromServer("string"); /*BLOCCATO QUI DOPO CHE SI FA UNLOCK*/
     if(response == NULL)
         return -1;
-    if(strncmp(response, "OK", 2) == 0) {
-        strcpy(last_file_opened, pathname);
-        last_op = op;
-        free(response);
-        return 0;
-    }//Se ho ricevuto dei file espulsi
-    else if(strncmp(response, "EXPELLED", 8) == 0){
+
+   if(strncmp(response, "EXPELLED", 8) == 0){
         char* filename = recieveFromServer("string");
         void* file_content = recieveFromServer("file");
         printf("File espluso %s\n", filename);
@@ -188,6 +189,15 @@ int openFile(const char* pathname, int flags){
             response = recieveFromServer("string");
         }
     }
+
+    if(strncmp(response, "OK", 2) == 0) {
+        strcpy(last_file_opened, pathname);
+        if(flags & O_LOCK)
+            add_head_element(locked_files, (void*)pathname);
+        last_op = op;
+        free(response);
+        return 0;
+    }//Se ho ricevuto dei file espulsi
     else {
         free(response); //TODO errno
         return -1;
@@ -220,7 +230,32 @@ int lockFile(const char* pathname){
 }
 
 int unlockFile(const char* pathname){
-    return 0;
+    printf("unlock file start\n");
+    sendToServer("UNLOCK_FILE", strlen("UNLOCK_FILE")+1,"string");
+    sendToServer((void*)pathname, strlen(pathname)+1, "string");
+
+    char* response = recieveFromServer("string");
+    if(response == NULL)
+        return -1;
+
+    if(strncmp(response, "OK", 2) == 0) {
+        last_op = unlockFile_op;
+        free(response);
+        elem_t * toDestroy = get_elem(locked_files, (char*)pathname, (int (*)(void *, void *)) strcmp);
+        free(toDestroy);
+        return 0;
+    }else if(strncmp(response, "ALREADY UNLOCKED", 16) == 0){
+        last_op = unlockFile_op;
+        free(response);
+        elem_t * toDestroy = get_elem(locked_files, (char*)pathname, (int (*)(void *, void *)) strcmp);
+        free(toDestroy);
+        return 1;
+    }//Se ho ricevuto dei file espulsi
+    else {
+        free(response); //TODO errno
+        return -1;
+    }
+
 }
 
 int sendToServer(void* content, size_t len, const char* contentType){
@@ -279,7 +314,7 @@ void reset(){
     strncpy(mySockname, "", MAX_SOCKNAME-1);
     last_op = closeConnection_op;
     if(locked_files != NULL) {
-        list_destroy(locked_files);
+        list_destroy(locked_files, NULL);
         locked_files = NULL;
     }
 }

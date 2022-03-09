@@ -45,7 +45,7 @@ void storage_destroy(storage_t* storage){
     }
 
     if(storage->coda_file != NULL) {
-        list_destroy(storage->coda_file);
+        list_destroy(storage->coda_file, NULL);
         storage->coda_file = NULL;
     }
 
@@ -72,25 +72,33 @@ int storage_removeFile(storage_t* storage, char* filename, int filesize){
 }
 
 //restituisce il file_t espulso
-int storage_espelliFile(storage_t* storage, int necess_memory, list_t* expelledFiles){
+int storage_espelliFile(storage_t* storage, int necess_memory, list_t** expelledFiles){
 
-    expelledFiles = list_create();
+    *expelledFiles = list_create();
 
     while(storage->max_memoria - storage->memoria_occupata < necess_memory || storage->numero_file == storage->max_file){
-        char* filename = (char*)remove_tail(storage->coda_file);
+        char filename[MAX_FILENAME];
+        elem_t* toDestroy = get_tail(storage->coda_file);
+        strcpy(filename,  (char*)toDestroy->content);
+        free(toDestroy);
+
         file_t* victim = storage_findFile(storage, filename);
         if(!victim)
             continue;
         else {
             file_t* toSend = file_create(victim->nome_file, victim->dimensione_file, victim->contenuto_file, victim->client_lock);
+            if(!toSend)
+                return -1;
 
             if( storage_removeFile(storage, filename, victim->dimensione_file) != 0)
                 return -1;
 
-            add_head_element(expelledFiles, toSend);
+            add_head_element(*expelledFiles, toSend);
+
 
         }
     }
+    return 0;
 
 }
 
@@ -102,7 +110,7 @@ int storage_addfile(storage_t* storage, file_t* file, char* filename, list_t** e
     //Se è stato raggiunto il numero massimo di file o se la memoria è piena devo espellere un file
     if(storage->numero_file == storage->max_file || (storage->memoria_occupata + file->dimensione_file) > storage->max_memoria){
         //ESPULSIONE FILE
-        storage_espelliFile(storage, file->dimensione_file, *expelledFiles);
+        storage_espelliFile(storage, file->dimensione_file, *&expelledFiles);
         printf("ESPULSIONE\n");
     }
 
@@ -114,7 +122,7 @@ int storage_addfile(storage_t* storage, file_t* file, char* filename, list_t** e
         storage->memoria_occupata+= file->dimensione_file;
     }
 
-    if(add_tail_element(storage->coda_file, (void*)filename) != 0)
+    if(add_head_element(storage->coda_file, (void*)filename) != 0)
         return -2;
 
     return 0;
@@ -134,6 +142,30 @@ file_t* storage_findFile(storage_t* storage, const char* filename){
     return found;
 }
 
+int storage_unlockFile(storage_t* storage, const char* filename, int client_fd){
+
+    if(!storage || !filename)
+        return -1;
+
+    file_t* modify = icl_hash_find(storage->files, (void*)filename);
+
+    if(!modify)
+        return -1;
+
+    //File non lockato
+    if(modify->client_lock == -1)
+        return 2;
+
+    if(modify->client_lock != client_fd)
+        return 1;
+
+    if(modify->client_lock == client_fd)
+        modify->client_lock = -1;
+
+    return 0;
+
+}
+
 int storage_lockFile(storage_t* storage, const char* filename, int client_fd){
 
     if(!storage || !filename)
@@ -144,7 +176,7 @@ int storage_lockFile(storage_t* storage, const char* filename, int client_fd){
     if(!modify)
         return -1;
 
-    if(modify->client_lock != -1)
+    if(modify->client_lock != -1 && modify->client_lock != client_fd)
         return 1;
     else
         modify->client_lock = client_fd;

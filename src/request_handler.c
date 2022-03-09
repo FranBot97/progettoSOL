@@ -40,6 +40,21 @@ void request_handler_function(request_t* request) {
               }
           }
 
+      }else if(strcmp(request->command, "UNLOCK_FILE") == 0){
+          char* filename = NULL;
+          if(readClient((void*)&filename, request->client_fd, "string") == 0){
+              int err;
+              if ( (err = unlockFile(request, filename) ) == 0) {
+                  writeClient("OK - File sbloccato correttamente", request->client_fd);
+              }
+              else if(err == 1)
+                  writeClient("ERROR - Un altro utente ha fatto la lock su questo file", request->client_fd);
+              else if(err == 2)
+                  writeClient("ALREADY UNLOCKED - Il file è già stato liberato", request->client_fd);
+              else {
+                  writeClient("ERROR - Impossibile trovare il file", request->client_fd);
+              }
+          }
       }
 
         //Comunico al thread main il file descriptor del client da analizzare di nuovo
@@ -52,6 +67,22 @@ void request_handler_function(request_t* request) {
         free(request);
 
     }
+}
+
+int unlockFile(request_t* request, char* filename){
+
+    if(!request || !filename)
+        return -1;
+
+    //TODO check lock errors
+    manage_storage(&(request->myStorage->storage_mutex), "lock");
+    if (storage_findFile(request->myStorage, filename) == NULL) {
+        manage_storage(&(request->myStorage->storage_mutex), "unlock");
+        return -1;
+    }
+    int return_value = (storage_unlockFile(request->myStorage, filename, request->client_fd));
+    manage_storage(&(request->myStorage->storage_mutex), "unlock");
+    return return_value;
 }
 
 int manage_storage(pthread_mutex_t* mutex, char* action){
@@ -137,14 +168,20 @@ int openFile(request_t* request, char* pathname) {
                         if(expelledFiles != NULL && expelledFiles->num_elem != 0){
                             //TODO INVIO I FILE ESPULSI AL CLIENT
                             int i = 0;
-                            while(i != expelledFiles->num_elem) {
+                            int max = expelledFiles->num_elem;
+                            while(i < max) {
                                 writeClient("EXPELLED", request->client_fd);
-                                file_t* toSend = remove_head(expelledFiles);
+                                elem_t* toDestroy = get_tail(expelledFiles);
+                                file_t* toSend = toDestroy->content;
                                 writeClient(toSend->nome_file, request->client_fd);
+                                writen(request->client_fd, &(toSend->dimensione_file), sizeof(int));
                                 writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
                                 i++;
+                                file_clean(toSend);
+                                free(toDestroy);
                             }
-                            writeClient("OK", request->client_fd);
+                            list_destroy(expelledFiles, (void*)file_clean);
+                            writeClient("STOP", request->client_fd);
                         }
                     manage_storage(storage_mutex, "unlock");
                 }
