@@ -26,13 +26,32 @@
 #define TIMEOUT_CONN_SEC 10
 #define MAX_FILESIZE 1024
 
-static int socket_fd;
 char sockname[MAX_LEN];
 
 enum flags_   {
     O_CREATE = 1 << 0,
     O_LOCK  = 1 << 1
 };
+
+//Stampa comandi disponibili
+static void print_help(){
+
+    printf("Comandi disponibili:\n\
+    -f filename: specifica il nome del socket AF_UNIX a cui connettersi \n\
+    -w dirname[,n=0]: invia al server al massimo 'n' file presenti nella cartella ‘dirname’, se n=0 vengono inviati tutti, se possibile \n\
+    -W file1[,file2]: lista di nomi di file da scrivere nel server separati da ‘,’ \n\
+    -D dirname: cartella dove ricevere i file che il server rimuove a seguito di capacity misses, da usare dopo -w o -W \n\
+    -r file1[,file2]: lista di nomi di file da leggere dal server separati da ‘,’\n\
+    -R [n=0]: legge ‘n’ file qualsiasi attualmente memorizzati nel server, se n=0 o non specificato allora vengono letti tutti i file presenti nel server\n\
+    -d dirname: cartella dove scrivere i file letti dal server da usare dopo ‘-r’ o ‘-R’\n\
+    -t time: tempo in millisecondi che intercorre tra l’invio di due richieste successive \n\
+    -l file1[,file2]: lista di nomi di file su cui acquisire la mutua esclusione\n\
+    -u file1[,file2]: lista di nomi di file su cui rilasciare la mutua esclusione\n\
+    -c file1[,file2]: lista di file da rimuovere dal server se presenti \n\
+    -p: abilita le stampe sullo standard output per ogni operazione\n   ");
+
+}
+
 
 void intHandler() {
     fflush(stdout);
@@ -45,115 +64,369 @@ void intHandler() {
     exit(1);
 }
 
-int main(int argc, char* argv[]){
+int checkArgument(const char* arg) {
 
+    if ( !optarg || arg[0] == '-'
+        || (strcmp(optarg, "-h") == 0) || (strcmp(optarg, "-f") == 0)
+        || (strcmp(optarg, "-w") == 0) || (strcmp(optarg, "-W") == 0)
+        || (strcmp(optarg, "-D") == 0) || (strcmp(optarg, "-r") == 0)
+        || (strcmp(optarg, "-R") == 0) || (strcmp(optarg, "-d") == 0)
+        || (strcmp(optarg, "-t") == 0) || (strcmp(optarg, "-l") == 0)
+        || (strcmp(optarg, "-u") == 0) || (strcmp(optarg, "-c") == 0)
+        || (strcmp(optarg, "-p") == 0)
+            ) {
+        return -1;
+    }else
+        return 0;
+}
+
+int main(int argc, char* argv[]) {
+
+    /*** VARIABILI CLIENT ******/
+    bool printInfo = false; //Abilita le stampe
+    long int msec = 0; //Tempo tra due richieste
     struct timespec timeLimit;
     clock_gettime(CLOCK_REALTIME, &timeLimit);
-    timeLimit.tv_sec += TIMEOUT_CONN_SEC;
-
-    strncpy(sockname, "mysock", MAX_LEN);
-
-    if (openConnection("mysock", RETRY_CONN_MSEC, timeLimit) != 0){
-        perror("Connessione al server");
-        return -1;
-    }
-
-    signal(SIGINT, intHandler);
-    signal(SIGPIPE, intHandler);
-    signal(SIGTSTP, intHandler);
-    //printf("%ld\n", timeLimit.tv_sec);
+    timeLimit.tv_sec += TIMEOUT_CONN_SEC; //Tempo limite per riconnessione
 
 
-   char request[LINE_MAX];
-    strcpy(request, "quit");
+    /*** INCOLLO ***/
+    /*Inizio gestione input*/
 
-    if (openFile("miofile", O_CREATE | O_LOCK) == 0)
-        printf("File aperto correttamente\n");
-    else
-        printf("Errore nell'apertura del file\n");
+    int opt; //identificativo opt
+    bool h_opt = false; //ci dice se ho già usato il comando "-h"
+    bool f_opt = false; //ci dice se ho già usato il comando "-f"
+    //bool last_op_W = false; //ci dice se l'ultimo comando è stato "-w" o "-W"
+    //bool last_op_R = false; //ci dice se l'ultimo comando è stato "-r" o "-R"
+    bool get_opt = false;
+    bool R_has_args = true;
+    opterr = 0;
 
-    printf("%d\n", unlockFile("miofile"));
+    while (get_opt || ((opt = getopt(argc, argv, ":hf:w:W:D:r:d:R:t:l:u:c:p")) != -1)) {
+        get_opt = false;
+
+        switch (opt) {
+
+            case 'h':
+                if (!h_opt) print_help();    //evita stampe multiple
+                h_opt = true;
+                break;
+
+            case 'f':
+                if (!f_opt) {//evita connessioni multiple
+
+                    if(checkArgument(optarg) == -1){
+                        optind--;
+                        get_opt = false;
+                        printf("Option -f requires an argument\n");
+                        break;
+                    }
+
+                    size_t len = strlen(optarg);
+                    if (len > MAX_SOCKNAME) {
+                        printf("Nome socket troppo lungo, massimo %d caratteri\n", MAX_SOCKNAME);
+                        return -1;
+                    }
+
+                    strncpy(sockname, optarg, MAX_SOCKNAME - 1);
+                    if (openConnection(sockname, RETRY_CONN_MSEC, timeLimit) == 0) {
+                        f_opt = true;
+                    }
+                } else
+                    printf("Sei già connesso alla socket %s\n", sockname);
+                break;
+
+            case 'w':
+                //TODO
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -w requires an argument\n");
+                    break;
+                }
+                opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
+                if (opt == -1) {
+                    break;
+                } else {
+                    switch (opt) {
+                        case 'D':
+                            if(!f_opt){
+                                printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                get_opt = false;
+                                break;
+                            }
+                            if(checkArgument(optarg) == -1){
+                                optind--;
+                                get_opt = false;
+                                printf("Option -D requires an argument\n");
+                                break;
+                            }
+                            get_opt = false;
+                            //todo opero con la cartella
+                            break;
+                        case '?':
+                            get_opt = true;
+                            break;
+                        default:
+                            get_opt = true;
+                    }
+                }
+                //dato che "optarg" è il nome della cartella vado ricorsivamente
+                //a fare per ogni file la "writeFile"
+                //invia file dalla cartella
+                break;
+
+            case 'W':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -W requires an argument\n");
+                    break;
+                }
+                 //TODO
+                opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
+                if (opt == -1) {
+                    break;
+                } else {
+                    switch (opt) {
+                        case 'D':
+                            if(!f_opt){
+                                printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                get_opt = false;
+                                break;
+                            }
+                            if(checkArgument(optarg) == -1){
+                                optind--;
+                                get_opt = false;
+                                printf("Option -D requires an argument\n");
+                                break;
+                            }
+                            get_opt = false;
+                            //todo opero con la cartella
+                            break;
+                        case '?':
+                            get_opt = true;
+                            break;
+                        default:
+                            get_opt = true;
+                    }
+                }
+                //invia file specificati
+                break;
+
+            case 'D':
+                printf("Nessuna operazione -w o -W valida associata al comando -D\n");
+                //return -1;//TODO: ERRORE
+                break;
+
+            case 'r':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -r requires an argument\n");
+                    break;
+                }
+                 //TODO
+                opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
+                if (opt == -1) {
+                    break;
+                } else {
+                    switch (opt) {
+                        case 'd':
+                            if(!f_opt){
+                                printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                get_opt = false;
+                                break;
+                            }
+                            get_opt = false;
+                            //todo opero con la cartella
+                            break;
+                        case '?':
+                            get_opt = true;
+                            break;
+                        default:
+                            get_opt = true;
+                    }
+                }
+                //Legge file specificati
+                break;
+
+            case 'R': {
+                if (R_has_args) {
+                    //caso R: con argomento obbligato
+                    //Devo controllare che tipo di argomento è, se un altro comando o numero o testo ecc..
+                    if (strcmp(optarg, "-d") == 0) { //TODO -------- [Caso -R -D ...]
+                        optind--;
+                        opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
+                        switch (opt) {
+                            case 'd':
+                                if (!f_opt) {
+                                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                    get_opt = false;
+                                    break;
+                                }
+                                get_opt = false;
+                                //todo opero con la cartella -d insieme leggere tutti i files
+                                printf("Leggo tutti i files con opzione -d\n");
+                                R_has_args = false;
+                                break;
+                            case ':':
+                                printf("Option -d requires an argument\n");
+                                return -1;
+                            default:
+                                return -1;
+                        }
+                        break;
+                    }
+                    //TODO ----------- caso -R -x ...
+                    if (checkArgument(optarg) == -1) { //Se l'argomento è un altro comando diverso da -d
+                        R_has_args = false;
+                        optind--;
+                        opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
+                        get_opt = true;
+
+                        //TODO Leggo tutti i files dal server senza -d
+                        printf("Leggo tutti i files  senza -d\n");
+                        break;
+                    }
+
+                    //TODO ---------- caso -R n
+                    //Se l'argomento non è un numero do errore
+                    long int n = 0;
+                    if (isNumber(optarg, &n) != 0) {
+                        printf("L'argomento del comando -R non è valido\n");
+                        break;
+                    } else {
+
+                        //Controllo se dopo c'è -d
+                        opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
+                        if (opt == -1) { //TODO ------- caso -R n ]
+                            //TODO leggo N files dal server senza cartella
+                            printf("Leggo N files senza -d\n");
+                            break;
+                        } else {
+                            switch (opt) {
+                                case 'd':
+                                    if (!f_opt) {
+                                        printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                        get_opt = false;
+                                        break;
+                                    }
+                                    get_opt = false;
+                                    //TODO leggo N files con opzione -d
+                                    printf("Leggo N files con opzione -d\n");
+                                    break;
+                                case ':':
+                                    printf("Option -d requires an argument\n");
+                                    return -1;
+                                default:
+                                    return -1;
+                            }
+                            break;
+                        }
+                    }
+                } else {
+                    //TODO operazione Read tutti i files senza niente
+                    printf("Leggo tutti i files senza opzione -d\n");
+                    break;
+                }
+            }
+
+            case 'd':
+                printf("Nessuna operazione -r o -R valida associata al comando -d\n");
+                break;
+
+            case 't':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -t requires an argument\n");
+                    break;
+                }
+
+                if (isNumber(optarg, &msec) != 0) {
+                    printf("Errore nel formato del comando -t, valore non impostato\n");
+                    msec = 0;
+                }
+                break;
+
+            case 'l':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -l requires an argument\n");
+                    break;
+                }
+
+                if(!f_opt){
+                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                    break;
+                }
+                // strtok di optarg su "," e poi
+                //lock sui file specificati
+                lockFile(optarg);
+                break;
+
+            case 'u':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -u requires an argument\n");
+                    break;
+                }
+                if(!f_opt){
+                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                    break;
+                }
+                // strtok di optarg su "," e poi
+                //unlock sui file specificati
+                unlockFile(optarg);
+                break;
+
+            case 'c':
+                if(checkArgument(optarg) == -1){
+                    optind--;
+                    get_opt = false;
+                    printf("Option -c requires an argument\n");
+                    break;
+                }
+                if(!f_opt){
+                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                    break;
+                }
+                //cancella i file specificati dal server
+                // strtok di optarg su "," e poi remove di ognuno
+                remove(optarg);
+                break;
+
+            case 'p':
+                //abilita le stampe per le operazioni
+                if (!printInfo) {
+                    printInfo = true;
+                }
+                break;
+
+            case '?':
+                printf("Comando sconosciuto\n");
+                break;
+
+            case ':':
+            {
+                   if(optopt == 'R') {
+                       R_has_args = false;
+                       optind--;
+                       opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
+                       get_opt = true;
+                       break;
+                   }
+            }
 
 
-    if (openFile("miofile", 0) == 0)
-        printf("File aperto correttamente\n");
-    else
-        printf("Errore nell'apertura del file\n");
-
-
-    if (openFile("miofile2", O_CREATE | O_LOCK) == 0)
-        printf("File aperto correttamente\n");
-    else
-        printf("Errore nell'apertura del file\n");
-
-    if (openFile("miofile4", O_CREATE | O_LOCK) == 0)
-        printf("File aperto correttamente\n");
-    else
-        printf("Errore nell'apertura del file\n");
-    closeConnection(sockname);
-
-    sendToServer(request, 4, "string");
-
-
-
-
-    /*if (read(socket_fd, request, LINE_MAX) <= 0) {
-        perror("reading mex");
-        return -1;
-    };
-    printf("Il mex ricevuto è: %s\n", request);
-
-   // unlink("mysock");
-    char NOME_SOCKET[MAX_PATH];
-    strcpy(NOME_SOCKET,"mysock");
-    socket_fd = socket(AF_UNIX,SOCK_STREAM,0);
-    if(socket_fd == -1) return -1;
-    struct sockaddr_un serv_addr;
-    memset(&serv_addr, '0', sizeof(serv_addr));
-    serv_addr.sun_family = AF_UNIX;
-    strncpy(serv_addr.sun_path, NOME_SOCKET, MAX_PATH);
-   if ( connect(socket_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr) ) != 0 ) {
-       printf("Conn %s",serv_addr.sun_path);
-       perror("");
-       return -1;
-   }
-    printf("Connesso\n");
-    fflush(stdout);
-    */
-
-
-  /*  while(1) {
-        strcpy(request, "");
-        if ( fgets(request, LINE_MAX, stdin) == NULL)
-            continue;
-
-        /**COME FARE RICHIESTE CLIENT**/
-  /*
-        unsigned long l = strlen(request);
-        //Rimuovo '\n'
-        request[l-1] = '\0';
-        if (write(socket_fd, &l, sizeof(int)) < 0) {
-            perror("errore w");
         }
-        if (write(socket_fd, request, l * sizeof(char)) < 0) {
-            perror("write client");
-            return -1;
-        };
+        /***************/
 
-       if( strcmp(request, "quit") == 0) {
-        close(socket_fd);
-        return 0;
-       }
 
-        printf("In attesa di risposta..\n");
-        fflush(stdout);
-
-        if (read(socket_fd, request, LINE_MAX) <= 0) {
-            perror("reading mex");
-            return -1;
-        };
-        printf("Il mex ricevuto è: %s\n", request);
-    }*/
+    }
 }
 /***** FINE TEST ****/
 

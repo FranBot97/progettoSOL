@@ -39,7 +39,6 @@ void request_handler_function(request_t* request) {
                   writeClient("ERROR - Impossibile aprire il file", request->client_fd);
               }
           }
-
       }else if(strcmp(request->command, "UNLOCK_FILE") == 0){
           char* filename = NULL;
           if(readClient((void*)&filename, request->client_fd, "string") == 0){
@@ -55,6 +54,8 @@ void request_handler_function(request_t* request) {
                   writeClient("ERROR - Impossibile trovare il file", request->client_fd);
               }
           }
+          if(filename)
+              free(filename);
       }
 
         //Comunico al thread main il file descriptor del client da analizzare di nuovo
@@ -62,7 +63,6 @@ void request_handler_function(request_t* request) {
             printf("Errore scrittura pipe\n");
         };
 
-        clean:
         free(request->command);
         free(request);
 
@@ -108,9 +108,8 @@ int manage_storage(pthread_mutex_t* mutex, char* action){
 
 int openFile(request_t* request, char* pathname) {
 
-    icl_hash_t *files = request->myStorage->files;
+
     pthread_mutex_t *storage_mutex = &(request->myStorage->storage_mutex);
-    //pthread_mutex_t *files_mutex = request->files_mutex;
     char *open_file_option = request->command;
 
     //Controllo se è una richiesta con creazione

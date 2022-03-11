@@ -72,8 +72,10 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
         clock_gettime(CLOCK_REALTIME, &now); //Ricalcolo il tempo attuale
         printf("Tentativo di riconnessione..\n");
     }
-    if(isConnected != 0)
-      return -1;
+    if(isConnected != 0) {
+        printf("Connessione fallita, riprovare\n");
+        return -1;
+    }
 
     //Se va a buon fine inizializzo i parametri
     connected = true;
@@ -178,6 +180,7 @@ int openFile(const char* pathname, int flags){
    if(strncmp(response, "EXPELLED", 8) == 0){
         char* filename = recieveFromServer("string");
         void* file_content = recieveFromServer("file");
+        file_content++; //TODO ignore warning
         printf("File espluso %s\n", filename);
         //TODO salvare il file in locale
         response = recieveFromServer("string");

@@ -179,6 +179,11 @@ static void* signals_check(void* write_fd){
 }
 
 
+/****GLOBALI O NO ? ************TODO*/
+char NOME_SOCKET[MAX_PATH] = "";
+storage_t* myStorage = NULL;
+threadpool_t* workers = NULL;
+
 
 int main(int argc, char* argv[]) {
 
@@ -190,17 +195,14 @@ int main(int argc, char* argv[]) {
     }
 
     /*****VARIABILI SERVER******/
-    char NOME_SOCKET[MAX_PATH] = "";
     int NUMERO_WORKERS = 0;
     int MAX_FILE = 0;
     int MAX_MEMORIA = 0;
     int REPLACE_MODE = 0; //0 = FIFO, 1 = LRU
     //pthread_mutex_t file_storage;
     //pthread_mutex_t files_mutex;
-    threadpool_t* workers = NULL;
-    storage_t* myStorage = NULL;
     int pfd[2]; //pipe
-    sigaction(SIGPIPE, &(struct sigaction){SIG_IGN}, NULL);
+    sigaction(SIGPIPE, &(struct sigaction){{SIG_IGN}}, NULL);
     //signal(SIGINT, )
 
     /*******THREAD GESTORE SEGNALI***********/
@@ -214,6 +216,7 @@ int main(int argc, char* argv[]) {
     printf("%d e %d \n", signals[0], signals[1]);
     //signals[0] per lettura
     //signals[1] scrittura
+  //  signal(SIGINT, intHandler);
     err = pthread_create(&signal_tid, NULL, signals_check, (void*)&signals[1] );
     if(err != 0)
         goto cleanup;
