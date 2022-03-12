@@ -2,31 +2,21 @@
 // Created by francesco on 19/11/21.
 //
 //TODO scegliere come fare per mandare messaggi/contenuti file
-//decidere protocollo client/server da utilizzare
 
 /***** INIZIO TEST ****/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
-#include <errno.h>
-#include <sys/socket.h>
 #include <unistd.h>
-#include <sys/un.h>
 #include <signal.h>
 #include <API.h>
+#include <constant_values.h>
 #include <time.h>
-#include <bits/types/struct_timeval.h>
+#include <sys/stat.h>
 
-#define MAX_PATH 108
-#define MAX_LEN 107
-#define LINE_MAX 128
-#define MAX_CONN 20
-#define RETRY_CONN_MSEC 2000
-#define TIMEOUT_CONN_SEC 10
-#define MAX_FILESIZE 1024
 
-char sockname[MAX_LEN];
+char sockname[MAX_SOCKNAME];
 
 enum flags_   {
     O_CREATE = 1 << 0,
@@ -80,7 +70,47 @@ int checkArgument(const char* arg) {
         return 0;
 }
 
+
+int parseFilename(char* pathname, char* result){
+
+    char* filename;
+    char name[MAX_FILENAME];
+    filename = strtok(pathname, "/");
+    while(filename != NULL){
+        strcpy(name, filename);
+        filename = strtok(NULL, "/");
+    }
+    strcpy(result, name);
+    return 0;
+}
+
+
+int readFileContent(char* pathname){
+
+    FILE* file;
+    file = fopen(pathname, "rb+");
+    if(!file){
+        perror("Open file");
+        return -1;
+    }
+    struct stat sb;
+    if (stat(pathname, &sb) == -1){
+        printf("ERRORE");
+    }
+
+    size_t file_size = sb.st_size;
+    void* data = malloc(file_size);
+    while (fread(data, 1, file_size, file) > 0){
+
+    }
+ //  ((char*)(data))[file_size] = '\0';
+    printf("%s", (char*)data);
+    fclose(file);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+
 
     /*** VARIABILI CLIENT ******/
     bool printInfo = false; //Abilita le stampe
@@ -89,20 +119,28 @@ int main(int argc, char* argv[]) {
     clock_gettime(CLOCK_REALTIME, &timeLimit);
     timeLimit.tv_sec += TIMEOUT_CONN_SEC; //Tempo limite per riconnessione
 
-
-    /*** INCOLLO ***/
     /*Inizio gestione input*/
 
     int opt; //identificativo opt
     bool h_opt = false; //ci dice se ho già usato il comando "-h"
-    bool f_opt = false; //ci dice se ho già usato il comando "-f"
-    //bool last_op_W = false; //ci dice se l'ultimo comando è stato "-w" o "-W"
-    //bool last_op_R = false; //ci dice se l'ultimo comando è stato "-r" o "-R"
+    bool f_opt = false; //ci dice se ho già usato con successo il comando "-f"
     bool get_opt = false;
     bool R_has_args = true;
     opterr = 0;
 
+    //Controlla lunghezza argomenti e controlla se è presente "-p" per attivare le stampe
+    for(int i = 0; i < argc; i++){
+        if(strlen(argv[i]) > MAX_ARGLEN) {
+            printf("Argomento troppo lungo, riprovare\n");
+            return -1;
+        }
+
+        if(strcmp(argv[i], "-p") == 0)
+            printInfo = true;
+    }
+
     while (get_opt || ((opt = getopt(argc, argv, ":hf:w:W:D:r:d:R:t:l:u:c:p")) != -1)) {
+
         get_opt = false;
 
         switch (opt) {
@@ -129,6 +167,11 @@ int main(int argc, char* argv[]) {
                     }
 
                     strncpy(sockname, optarg, MAX_SOCKNAME - 1);
+
+                    //Eventuale attesa
+                    if(msec > 0)
+                        sleep(msec/1000);
+
                     if (openConnection(sockname, RETRY_CONN_MSEC, timeLimit) == 0) {
                         f_opt = true;
                     }
@@ -138,24 +181,28 @@ int main(int argc, char* argv[]) {
 
             case 'w':
                 //TODO
-                if(checkArgument(optarg) == -1){
+            {
+                char pathname[MAX_ARGLEN];
+                if (checkArgument(optarg) == -1) {
                     optind--;
                     get_opt = false;
                     printf("Option -w requires an argument\n");
                     break;
+                } else {
+                    strcpy(pathname, optarg);
                 }
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
-                    break;
+
                 } else {
                     switch (opt) {
                         case 'D':
-                            if(!f_opt){
+                            if (!f_opt) {
                                 printf("Connessione al server assente, impossibile completare la richiesta\n");
                                 get_opt = false;
                                 break;
                             }
-                            if(checkArgument(optarg) == -1){
+                            if (checkArgument(optarg) == -1) {
                                 optind--;
                                 get_opt = false;
                                 printf("Option -D requires an argument\n");
@@ -170,12 +217,16 @@ int main(int argc, char* argv[]) {
                         default:
                             get_opt = true;
                     }
+                    break;
                 }
                 //dato che "optarg" è il nome della cartella vado ricorsivamente
                 //a fare per ogni file la "writeFile"
                 //invia file dalla cartella
+                char name[MAX_FILENAME];
+                parseFilename(pathname, name);
+                printf("%s", name);
                 break;
-
+            }
             case 'W':
                 if(checkArgument(optarg) == -1){
                     optind--;
@@ -186,7 +237,6 @@ int main(int argc, char* argv[]) {
                  //TODO
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
-                    break;
                 } else {
                     switch (opt) {
                         case 'D':
@@ -210,8 +260,14 @@ int main(int argc, char* argv[]) {
                         default:
                             get_opt = true;
                     }
+                    break;
                 }
-                //invia file specificati
+                if(!f_opt){
+                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                    get_opt = false;
+                    break;
+                }
+                 //invia file specificati
                 break;
 
             case 'D':
@@ -229,7 +285,7 @@ int main(int argc, char* argv[]) {
                  //TODO
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
-                    break;
+
                 } else {
                     switch (opt) {
                         case 'd':
@@ -247,15 +303,17 @@ int main(int argc, char* argv[]) {
                         default:
                             get_opt = true;
                     }
+                    break;
                 }
                 //Legge file specificati
                 break;
 
             case 'R': {
+
                 if (R_has_args) {
                     //caso R: con argomento obbligato
                     //Devo controllare che tipo di argomento è, se un altro comando o numero o testo ecc..
-                    if (strcmp(optarg, "-d") == 0) { //TODO -------- [Caso -R -D ...]
+                    if (strcmp(optarg, "-d") == 0) { //TODO -------- [Caso -R -d ...]
                         optind--;
                         opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
                         switch (opt) {
@@ -279,13 +337,20 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                     //TODO ----------- caso -R -x ...
-                    if (checkArgument(optarg) == -1) { //Se l'argomento è un altro comando diverso da -d
+                    if (checkArgument(optarg) == -1) {
+                      //  printf("%s", optarg);
+                      // Se l'argomento è un altro comando diverso da -d
                         R_has_args = false;
                         optind--;
                         opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
                         get_opt = true;
 
                         //TODO Leggo tutti i files dal server senza -d
+                        if (!f_opt) {
+                            printf("Connessione al server assente, impossibile completare la richiesta\n");
+                            get_opt = false;
+                            break;
+                        }
                         printf("Leggo tutti i files  senza -d\n");
                         break;
                     }
@@ -300,33 +365,52 @@ int main(int argc, char* argv[]) {
 
                         //Controllo se dopo c'è -d
                         opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
+                       // printf("%c\n", opt);
                         if (opt == -1) { //TODO ------- caso -R n ]
                             //TODO leggo N files dal server senza cartella
+                            if (!f_opt) {
+                                printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                get_opt = false;
+                                break;
+                            }
                             printf("Leggo N files senza -d\n");
                             break;
                         } else {
-                            switch (opt) {
-                                case 'd':
-                                    if (!f_opt) {
-                                        printf("Connessione al server assente, impossibile completare la richiesta\n");
-                                        get_opt = false;
-                                        break;
-                                    }
+
+                            if(opt != 'd'){
+                                //TODO leggo N files dal server senza cartella
+                                if (!f_opt) {
+                                    printf("Connessione al server assente, impossibile completare la richiesta\n");
                                     get_opt = false;
-                                    //TODO leggo N files con opzione -d
-                                    printf("Leggo N files con opzione -d\n");
                                     break;
-                                case ':':
+                                }
+                                printf("Leggo N files senza -d\n");
+                                get_opt = true;
+                                break;
+                            }else{
+                                if(optarg == 0){
                                     printf("Option -d requires an argument\n");
                                     return -1;
-                                default:
-                                    return -1;
+                                }
+                                if (!f_opt) {
+                                    printf("Connessione al server assente, impossibile completare la richiesta\n");
+                                    get_opt = false;
+                                    break;
+                                }
+                                get_opt = false;
+                                //TODO leggo N files con opzione -d
+                                printf("Leggo N files con opzione -d\n");
+                                break;
                             }
-                            break;
                         }
                     }
                 } else {
                     //TODO operazione Read tutti i files senza niente
+                    if (!f_opt) {
+                        printf("Connessione al server assente, impossibile completare la richiesta\n");
+                        get_opt = false;
+                        break;
+                    }
                     printf("Leggo tutti i files senza opzione -d\n");
                     break;
                 }
@@ -364,7 +448,20 @@ int main(int argc, char* argv[]) {
                 }
                 // strtok di optarg su "," e poi
                 //lock sui file specificati
-                lockFile(optarg);
+                char* filename = NULL;
+                filename = strtok(optarg, ",");
+                while (filename  != NULL){
+                   // printf("il file è %s\n", filename);
+                    //Eventuale attesa
+                    if(msec > 0)
+                        sleep(msec/1000);
+                    if (lockFile(filename) == 0){
+                        if(printInfo) printf("OPERAZIONE:  Lock file \nFILE: %s \nESITO: Priorità acquisita correttamente\n", filename);
+                    }else{
+                        if(printInfo) printf("OPERAZIONE: Lock file \nFILE: %s \nESITO: Impossibile acquisire la priorità sul file\n", filename);
+                    }
+                    filename = strtok(NULL, ",");
+                }
                 break;
 
             case 'u':
@@ -380,7 +477,28 @@ int main(int argc, char* argv[]) {
                 }
                 // strtok di optarg su "," e poi
                 //unlock sui file specificati
-                unlockFile(optarg);
+                filename = NULL;
+                filename = strtok(optarg, ",");
+                while (filename  != NULL){
+                    // printf("il file è %s\n", filename);
+                    //Eventuale attesa
+                    if(msec > 0)
+                        sleep(msec/1000);
+                    if (unlockFile(filename) == 0){
+                        if(printInfo){
+                            printf("---------------------------------\n"
+                                   "OPERAZIONE:  Unlock file \nFILE: %s \nESITO: Priorità rilasciata correttamente\n"
+                                   "---------------------------------\n",
+                                   filename);
+                        }
+                    }else{
+                        if(printInfo) printf("=====================================\n"
+                                             "OPERAZIONE: Unlock file \nFILE: %s \nESITO: Impossibile rilasciare la priorità sul file\n"
+                                             "=====================================\n",
+                                             filename);
+                    }
+                    filename = strtok(NULL, ",");
+                }
                 break;
 
             case 'c':
@@ -407,7 +525,7 @@ int main(int argc, char* argv[]) {
                 break;
 
             case '?':
-                printf("Comando sconosciuto\n");
+                printf("Comando sconosciuto -%c\n", optopt);
                 break;
 
             case ':':
@@ -418,14 +536,12 @@ int main(int argc, char* argv[]) {
                        opt = getopt(argc, argv, ":hf:w:W:D:r:Rd:t:l:u:c:p");
                        get_opt = true;
                        break;
+                   }else{
+                       printf("Option %c requires an argument\n", optopt);
                    }
             }
-
-
         }
         /***************/
-
-
     }
 }
 /***** FINE TEST ****/

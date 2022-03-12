@@ -227,12 +227,56 @@ int appendToFile(const char* pathname, void* buf, size_t size, const char* dirna
 }
 
 int lockFile(const char* pathname){
+
+    if(!connected){
+        errno = ENOTCONN;
+        return -1;
+    }
+
+    if(!pathname){
+        errno = EINVAL;
+        return -1;
+    }
+
+    printf("Lock file start\n");
+    sendToServer("LOCK_FILE", strlen("LOCK_FILE")+1,"string");
+    sendToServer((void*)pathname, strlen(pathname)+1, "string");
+
+    char* response = recieveFromServer("string");
+    if(response == NULL)
+        return -1;
+
+    if(strncmp(response, "OK", 2) == 0) {
+        last_op = lockFile_op;
+        add_head_element(locked_files, (char*)pathname);
+        free(response);
+        return 0;
+    }else if(strcmp(response, "ALREADY LOCKED") == 0){
+        last_op = lockFile_op;
+        free(response);
+        return 0;
+    }else if(strcmp(response, "ERROR") == 0){
+        free(response);
+        return -1;
+    }
+
     //TODO send request to server and if ok modify API list
-    add_head_element(locked_files, (char*)pathname);
-    return 0;
+
+    return -1;
 }
 
 int unlockFile(const char* pathname){
+
+    if(!connected){
+        errno = ENOTCONN;
+        return -1;
+    }
+
+    if(!pathname){
+        errno = EINVAL;
+        return -1;
+    }
+
     printf("unlock file start\n");
     sendToServer("UNLOCK_FILE", strlen("UNLOCK_FILE")+1,"string");
     sendToServer((void*)pathname, strlen(pathname)+1, "string");
