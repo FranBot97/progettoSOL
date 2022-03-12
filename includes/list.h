@@ -2,8 +2,8 @@
 // Created by linuxlite on 21/02/22.
 //
 
-#ifndef NOVEMBREPROG_LIST_H
-#define NOVEMBREPROG_LIST_H
+#ifndef LIST_H
+#define LIST_H
 #include "file.h"
 #include "stdlib.h"
 
@@ -38,4 +38,4 @@ elem_t* get_elem(list_t* list, void* value, int (*)(void*, void*));
 
 void list_destroy(list_t* list, void (*)(void*));
 
-#endif //NOVEMBREPROG_LIST_H
+#endif //LIST_H

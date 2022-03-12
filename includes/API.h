@@ -7,9 +7,7 @@
 #include <stdbool.h>
 #include <list.h>
 #include <util.h>
-#define MAX_FILENAME 128
-#define MAX_SOCKNAME 107
-#define MAX_REQUEST 64
+#include <constant_values.h>
 
 int sendToServer(void* content, size_t len, const char* contentType);
 

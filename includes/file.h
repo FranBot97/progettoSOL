@@ -2,10 +2,9 @@
 // Created by francesco on 19/11/21.
 //
 
-#ifndef NOVEMBREPROG_FILE_H
-#define NOVEMBREPROG_FILE_H
-#define MAX_FILENAME 128
-
+#ifndef FILE_H
+#define FILE_H
+#include <constant_values.h>
 
 typedef struct file{
 
@@ -47,4 +46,4 @@ void file_destroy(file_t* myfile);
 void file_clean(file_t *myfile);
 
 
-#endif //NOVEMBREPROG_FILE_H
+#endif //FILE_H

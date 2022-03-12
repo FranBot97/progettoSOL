@@ -1,11 +1,11 @@
 //
 // Created by linuxlite on 21/02/22.
 //
-#include "icl_hash.h" //TODO mettere <>
+#include <icl_hash.h>
 #include <list.h>
 #include <pthread.h>
-#ifndef NOVEMBREPROG_STORAGE_H
-#define NOVEMBREPROG_STORAGE_H
+#ifndef STORAGE_H
+#define STORAGE_H
 
 
 typedef struct storage_{
