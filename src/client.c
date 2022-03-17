@@ -70,21 +70,6 @@ int checkArgument(const char* arg) {
         return 0;
 }
 
-
-int parseFilename(char* pathname, char* result){
-
-    char* filename;
-    char name[MAX_FILENAME];
-    filename = strtok(pathname, "/");
-    while(filename != NULL){
-        strcpy(name, filename);
-        filename = strtok(NULL, "/");
-    }
-    strcpy(result, name);
-    return 0;
-}
-
-
 int readFileContent(char* pathname){
 
     FILE* file;
@@ -139,7 +124,7 @@ int main(int argc, char* argv[]) {
             printInfo = true;
     }
 
-    while (get_opt || ((opt = getopt(argc, argv, ":hf:w:W:D:r:d:R:t:l:u:c:p")) != -1)) {
+    while (get_opt || ((opt = getopt(argc, argv, ":hf:w:W:D:r:d:R:t:l:u:c:pq")) != -1)) {
 
         get_opt = false;
 
@@ -227,25 +212,25 @@ int main(int argc, char* argv[]) {
                 printf("%s", name);
                 break;
             }
-            case 'W':
-                if(checkArgument(optarg) == -1){
+            case 'W': {
+                char argument[MAX_ARGLEN];
+                char* directory = NULL;
+                if (checkArgument(optarg) == -1) {
                     optind--;
                     get_opt = false;
                     printf("Option -W requires an argument\n");
                     break;
+                } else {
+                    //Mi salvo optarg
+                    strcpy(argument, optarg);
                 }
-                 //TODO
+                //TODO
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
                 } else {
                     switch (opt) {
                         case 'D':
-                            if(!f_opt){
-                                printf("Connessione al server assente, impossibile completare la richiesta\n");
-                                get_opt = false;
-                                break;
-                            }
-                            if(checkArgument(optarg) == -1){
+                            if (checkArgument(optarg) == -1) {
                                 optind--;
                                 get_opt = false;
                                 printf("Option -D requires an argument\n");
@@ -253,6 +238,12 @@ int main(int argc, char* argv[]) {
                             }
                             get_opt = false;
                             //todo opero con la cartella
+                            directory = malloc(sizeof(char)*strlen(optarg)+1);
+                            if(!directory){
+                                perror("Malloc");
+                                exit(EXIT_FAILURE);
+                            }
+                            strcpy(directory, optarg);
                             break;
                         case '?':
                             get_opt = true;
@@ -260,16 +251,35 @@ int main(int argc, char* argv[]) {
                         default:
                             get_opt = true;
                     }
-                    break;
                 }
-                if(!f_opt){
+                if (!f_opt) {
                     printf("Connessione al server assente, impossibile completare la richiesta\n");
                     get_opt = false;
                     break;
                 }
-                 //invia file specificati
-                break;
 
+                //invia file specificati senza opzione -D
+                char* filepath;
+                char* rest = NULL;
+                filepath = strtok_r(argument, ",", &rest);
+
+                while(filepath != NULL) {
+                    struct stat st;
+                    stat(filepath, &st);
+                    off_t len = st.st_size;
+                    printf("%ld", len);
+                    openFile(filepath, O_CREATE | O_LOCK);
+                    if (writeFile(filepath, directory) != 0)
+                        perror("Writing file");
+                    //closeFile(filename);
+                    filepath = strtok_r(NULL, ",", &rest);
+                }
+                printf("Termine\n");
+                if(directory)
+                    free(directory);
+
+                break;
+            }
             case 'D':
                 printf("Nessuna operazione -w o -W valida associata al comando -D\n");
                 //return -1;//TODO: ERRORE
@@ -524,6 +534,10 @@ int main(int argc, char* argv[]) {
                 }
                 break;
 
+            case 'q':
+                sendToServer("quit", strlen("quit")+1, "string");
+                break;
+
             case '?':
                 printf("Comando sconosciuto -%c\n", optopt);
                 break;
@@ -543,6 +557,7 @@ int main(int argc, char* argv[]) {
         }
         /***************/
     }
+    closeConnection(sockname);
 }
 /***** FINE TEST ****/
 

@@ -56,6 +56,17 @@ void request_handler_function(request_t* request) {
           }
           if(filename)
               free(filename);
+      }else if(strcmp(request->command, "WRITE_FILE") == 0){
+          char* filename = NULL;
+          if(readClient((void*)&filename, request->client_fd, "string") == 0){
+             if( writeFile(request, filename) == 0){
+                 printf("OK");
+             }else{
+                 printf("NOT OK");
+             }
+          }
+          if(filename)
+              free(filename);
       }
 
         //Comunico al thread main il file descriptor del client da analizzare di nuovo
@@ -68,6 +79,90 @@ void request_handler_function(request_t* request) {
 
     }
 }
+
+
+int writeFile(request_t* request, char* filename){
+
+    if(!filename || strlen(filename) > MAX_FILENAME){
+        errno = EINVAL;
+        return -1;
+    }
+
+    //Ricevo prima dimensione del contenuto del file e poi il contenuto
+    size_t file_len = 0;
+    void** file_content = NULL;
+    readn(request->client_fd, &file_len, sizeof(size_t));
+    if(file_len > request->myStorage->max_memoria){
+        errno = EINVAL;
+        return -1;
+    }
+    if(file_len != 0)
+        file_content = malloc(file_len);
+    if(!file_content && (file_len != 0)){
+        perror("Malloc");
+        close(request->client_fd);
+        exit(EXIT_FAILURE);
+    }
+    if(file_len != 0)
+        readn(request->client_fd, file_content, file_len);
+
+    //Controllo che il file esista prima di scriverlo
+    pthread_mutex_t storage_mutex = request->myStorage->storage_mutex;
+    if (manage_storage(&storage_mutex, "lock") != 0){
+        perror("Mutex");
+        close(request->client_fd);
+        exit(EXIT_FAILURE);
+    }
+    file_t* toWrite;
+    //Se esiste
+    if ( (toWrite = storage_findFile(request->myStorage, filename)) != NULL){
+        //Si può fare la write solo se prima è stata fatta la lock
+       if( toWrite->client_lock == request->client_fd){
+           list_t* expelledFiles = NULL;
+          if(storage_writeFileContent(request->myStorage, toWrite, filename, file_content, file_len, O_REPLACE, &expelledFiles) == 0) {
+              if (manage_storage(&storage_mutex, "unlock") != 0){
+                  perror("Mutex");
+                  close(request->client_fd);
+                  exit(EXIT_FAILURE);
+              }
+
+              //Comunico al client
+              if(expelledFiles != NULL && expelledFiles->num_elem != 0){
+                  //TODO INVIO I FILE ESPULSI AL CLIENT
+                  int i = 0;
+                  int max = expelledFiles->num_elem;
+                  while(i < max) {
+                      writeClient("EXPELLED", request->client_fd);
+                      elem_t* toDestroy = get_tail(expelledFiles);
+                      file_t* toSend = toDestroy->content;
+                      writeClient(toSend->nome_file, request->client_fd);
+                      writen(request->client_fd, &(toSend->dimensione_file), sizeof(int));
+                      if(toSend->dimensione_file != 0)
+                        writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
+                      printf("%s", (char*)toSend->contenuto_file);
+                      i++;
+                      file_clean(toSend);
+                      free(toDestroy);
+                  }
+                  list_destroy(expelledFiles, (void*)file_clean);
+                  writeClient("STOP", request->client_fd);
+              }
+              writeClient("OK", request->client_fd);
+              return 0;
+          }
+       }
+    }
+    free(file_content);
+    //Se non esiste
+    writeClient("ERROR", request->client_fd);
+    if (manage_storage(&storage_mutex, "unlock") != 0){
+        perror("Mutex");
+        close(request->client_fd);
+        exit(EXIT_FAILURE);
+    }
+    return -1;
+}
+
 
 int unlockFile(request_t* request, char* filename){
 
@@ -164,6 +259,7 @@ int openFile(request_t* request, char* pathname) {
                             errno = EXIT_FAILURE;
                             return -1;
                         }
+                        manage_storage(storage_mutex, "unlock");
                         if(expelledFiles != NULL && expelledFiles->num_elem != 0){
                             //TODO INVIO I FILE ESPULSI AL CLIENT
                             int i = 0;
@@ -173,8 +269,16 @@ int openFile(request_t* request, char* pathname) {
                                 elem_t* toDestroy = get_tail(expelledFiles);
                                 file_t* toSend = toDestroy->content;
                                 writeClient(toSend->nome_file, request->client_fd);
-                                writen(request->client_fd, &(toSend->dimensione_file), sizeof(int));
-                                writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
+                                writen(request->client_fd, &(toSend->dimensione_file), sizeof(unsigned long));
+                                if(toSend->dimensione_file != 0)
+                                    writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
+
+                                //************TODO TEST
+                                char* content_to_string = malloc(toSend->dimensione_file+1);
+                                memcpy(content_to_string, toSend->contenuto_file, toSend->dimensione_file);
+                                content_to_string[toSend->dimensione_file] = '\0';
+                                printf("%s", content_to_string);
+
                                 i++;
                                 file_clean(toSend);
                                 free(toDestroy);
@@ -182,7 +286,7 @@ int openFile(request_t* request, char* pathname) {
                             list_destroy(expelledFiles, (void*)file_clean);
                             writeClient("STOP", request->client_fd);
                         }
-                    manage_storage(storage_mutex, "unlock");
+                        //LA UNLOCK PRIMA ERA QUI, SE NON VA RIMETTERLA QUI
                 }
                 return 0;
 

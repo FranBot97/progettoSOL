@@ -7,10 +7,11 @@
 #include <file.h>
 #include <list.h>
 #include <string.h>
+#include <errno.h>
 
 //TODO PROSSIMA COSA DA FARE: GESTIRE ESPULSIONE FILE E CONTROLLARE PERCHE' NON VA
 
-storage_t* storage_create(int max_file, int max_memoria, int replace_mode){
+storage_t* storage_create(int max_file, unsigned long max_memoria, int replace_mode){
 
     //Errore: "max_file" e "max_memoria" non possono essere <= 0
     if(max_memoria <= 0 || max_file <= 0 )
@@ -72,14 +73,22 @@ int storage_removeFile(storage_t* storage, char* filename, int filesize){
 }
 
 //restituisce il file_t espulso
-int storage_espelliFile(storage_t* storage, int necess_memory, list_t** expelledFiles){
+int storage_espelliFile(storage_t* storage, size_t necess_memory, list_t** expelledFiles){
 
-    *expelledFiles = list_create();
+    if(necess_memory > storage->max_memoria){
+        return -1;
+    }
+
+    if(storage->max_memoria - storage->memoria_occupata < necess_memory || storage->numero_file == storage->max_file)
+        *expelledFiles = list_create();
+
+    if(!expelledFiles)
+        return -1;
 
     while(storage->max_memoria - storage->memoria_occupata < necess_memory || storage->numero_file == storage->max_file){
         char filename[MAX_FILENAME];
         elem_t* toDestroy = get_tail(storage->coda_file);
-        strcpy(filename,  (char*)toDestroy->content);
+        strcpy(filename,  (char*)toDestroy->content); //problema qui, mi dice che toDestroy->content non è allocato
         free(toDestroy);
 
         file_t* victim = storage_findFile(storage, filename);
@@ -94,7 +103,7 @@ int storage_espelliFile(storage_t* storage, int necess_memory, list_t** expelled
                 return -1;
 
             add_head_element(*expelledFiles, toSend);
-
+//TODO DEALLOCARE I FILE CHE POI VENGONO ESPULSI ????????
 
         }
     }
@@ -183,4 +192,54 @@ int storage_lockFile(storage_t* storage, const char* filename, int client_fd){
 
     return 0;
 
+}
+
+int storage_writeFileContent(storage_t* storage, file_t* file, const char* filename, void* file_content, size_t len, int flags, list_t** expelledFiles){
+
+    if(!storage || !file_content || len > storage->max_memoria) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if(file == NULL){
+        file = storage_findFile(storage, filename);
+        if(file == NULL)
+            return -1;
+    }
+
+    //Controllo e salvo eventuali file da espellere
+    if(storage->max_file != 1) //Se c'è un solo file non si espelle perché è il file su cui devo scrivere
+        storage_espelliFile(storage, len, *&expelledFiles);
+
+    if(flags & O_REPLACE) { //Scrivi da zero
+
+        //Se nel file c'era qualcosa allora prima rimuovo tutto
+        if(file->dimensione_file != 0) {
+            storage->memoria_occupata -= file->dimensione_file;
+
+            if(file->contenuto_file)
+                free(file->contenuto_file);
+
+            file->dimensione_file = 0;
+            file->contenuto_file = NULL;
+            }
+
+        file->contenuto_file = malloc(len);
+        //Poi scrivo da zero
+        memcpy(file->contenuto_file, file_content, len);
+        file->contenuto_file = file_content;
+        file->dimensione_file = len;
+        storage->memoria_occupata += file->dimensione_file;
+
+    }else{
+        //Scrivi in append
+        if ( (file->contenuto_file = realloc(file->contenuto_file, file->dimensione_file + len)) == NULL){
+            perror("Malloc");
+            exit(EXIT_FAILURE);
+        }
+        memcpy(file->contenuto_file + file->dimensione_file, file_content, len);
+        file->dimensione_file += len;
+        storage->memoria_occupata += len;
+    }
+    return 0;
 }
