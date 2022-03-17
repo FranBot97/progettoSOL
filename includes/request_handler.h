@@ -20,6 +20,8 @@ int readClient(void** content, int client_fd, const char* contentType);
 
 int openFile(request_t* request, char* pathname);
 
+int writeFile(request_t* request, char* filename);
+
 int unlockFile(request_t* request, char* filename);
 
 #endif //REQUEST_HANDLER_H

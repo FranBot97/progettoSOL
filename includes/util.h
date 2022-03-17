@@ -73,4 +73,19 @@ static inline int isNumber(const char* s, long* n) {
 }
 
 
+static inline int parseFilename(char* pathname, char* result){
+
+    char* filename;
+    char name[MAX_FILENAME];
+    char* rest = NULL;
+    filename = strtok_r(pathname, "/", &rest);
+    while(filename != NULL){
+        strcpy(name, filename);
+        filename = strtok_r(NULL, "/", &rest);
+    }
+    strcpy(result, name);
+    return 0;
+}
+
+
 #endif

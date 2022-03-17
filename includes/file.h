@@ -9,7 +9,7 @@
 typedef struct file{
 
     char nome_file[MAX_FILENAME];
-    int dimensione_file; //in KB
+    unsigned long dimensione_file; //in KB
     void* contenuto_file;
     int client_lock; //client che ha acquisito la lock
 
@@ -25,7 +25,7 @@ typedef struct file{
  *
  * @returns puntatore al file creato, NULL in caso di errore.
  */
-file_t* file_create(char* nome_file, int dimensione_file,  void* contenuto_file, int client_lock);
+file_t* file_create(char* nome_file, unsigned long dimensione_file,  void* contenuto_file, int client_lock);
 
 
 /**
