@@ -9,14 +9,36 @@
 #include <storage.h>
 
 typedef struct request{
-    int len;
-    char *command;
-    int client_fd;
-   // pthread_mutex_t* storage_mutex;
-    //pthread_mutex_t* files_mutex;
-    storage_t* myStorage;
+    int opcode;
+    long client_fd;
+    storage_t* storage;
     int pipe_write;
 } request_t;
+
+
+enum opcode_{
+    OPEN = 1,
+    WRITE = 2,
+    READ = 3,
+    READN = 4,
+    LOCK = 5,
+    UNLOCK = 6,
+    REMOVE = 7,
+    CLOSE = 8,
+    NONE = 0,
+    SHUTDOWN = -1
+};
+
+enum flags_   {
+    O_CREATE = 1 << 0,
+    O_LOCK  = 1 << 1
+};
+
+enum errors_{
+    SUCCESS = 0,
+    FAILURE = -1,
+    FATAL = 1,
+};
 
 
 #endif //REQUEST_H

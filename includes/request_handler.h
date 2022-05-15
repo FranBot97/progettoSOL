@@ -6,22 +6,36 @@
 #define REQUEST_HANDLER_H
 #include <stdio.h>
 #include <request.h>
+#include <stdbool.h>
 #include <pthread.h>
 
 void request_handler_function(request_t* request);
 
-int manage_storage(pthread_mutex_t* file_storage, char* action);
+// Operazioni sullo storage //
 
-int writeClient(char* msg, int client_fd);
+int server_openFile(request_t* request);
 
-int readClientSingle(void* content, int client_fd, size_t size);
+int server_readFile(request_t* request);
 
-int readClient(void** content, int client_fd, const char* contentType);
+int server_readNFiles(request_t* request, int N);
 
-int openFile(request_t* request, char* pathname);
+int server_writeFile(request_t* request);
 
-int writeFile(request_t* request, char* filename);
+int server_appendToFile(request_t* request);
 
-int unlockFile(request_t* request, char* filename);
+int server_lockFile(request_t* request);
+
+int server_unlockFile(request_t* request);
+
+int server_closeFile(request_t* request);
+
+int server_removeFile(request_t* request);
+
+
+// Funzioni di supporto //
+
+int server_addClientWaiting(request_t* request);
+
+int server_removeClientWaiting(request_t* request);
 
 #endif //REQUEST_HANDLER_H
