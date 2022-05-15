@@ -1,53 +1,129 @@
 //
 // Created by linuxlite on 21/02/22.
 //
-#include <storage.h>
-#include <icl_hash.h>
+#include "../includes/storage.h"
+#include "../includes/icl_hash.h"
 #include <stdlib.h>
-#include <file.h>
-#include <list.h>
+#include "../includes/list.h"
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
+#include "../includes/util.h"
+#include "../includes/request.h"
+int compareInt(void* a, void* b){
+    if(*(int*)a == *(int*)b)
+        return 0;
+    else
+        return -1;
+}
+//TODO vedere come gestire errori lock/unlock fatali ?
 
-//TODO PROSSIMA COSA DA FARE: GESTIRE ESPULSIONE FILE E CONTROLLARE PERCHE' NON VA
+/*
+file_t* file_create(char* nome_file, unsigned long dimensione_file,  void* contenuto_file, int client_lock){
 
-storage_t* storage_create(int max_file, unsigned long max_memoria, int replace_mode){
+    file_t *newFile;
+    newFile = (file_t*)malloc(sizeof(file_t));
+    if (!newFile) return NULL;
+
+    strcpy(newFile->filename, nome_file);
+    newFile->size = dimensione_file;
+    newFile->client_locker = client_lock;
+    if(contenuto_file != NULL) {
+        newFile->content = malloc(dimensione_file);
+        memcpy(newFile->content, contenuto_file, dimensione_file);
+    }else{
+        newFile->content = NULL;
+    }
+    newFile->mutex = rwlock_init();
+
+    return newFile;
+}*/
+
+void file_destroy(file_t *myfile){
+
+    if(!myfile) return;
+
+    if(myfile->filename)
+        free(myfile->filename);
+
+    if((myfile->content))
+        free((myfile->content));
+
+    if(myfile->who_opened)
+        list_destroy(myfile->who_opened, free);
+
+    if(myfile->mutex)
+        rwlock_destroy(myfile->mutex);
+
+    myfile->size = -1;
+    myfile->client_locker = -1;
+
+    if(myfile){
+        free(myfile);
+        myfile = NULL;
+    }
+}
+
+//Sets errno malloc
+storage_t* storage_create(int files_limit, unsigned long long memory_limit, int replace_mode){
 
     //Errore: "max_file" e "max_memoria" non possono essere <= 0
-    if(max_memoria <= 0 || max_file <= 0 )
+    if(files_limit <= 0 || memory_limit <= 0 )
         return NULL;
-    storage_t* storage_return = (storage_t*)malloc(sizeof(storage_t));
 
-    storage_return->max_file = max_file;
-    storage_return->max_memoria = max_memoria;
-    storage_return->files = icl_hash_create((int)max_file, hash_pjw, string_compare);
-    storage_return->coda_file = list_create(); //todo in base al replace_mode
-    storage_return->numero_file = 0;
-    storage_return->memoria_occupata = 0;
-    pthread_mutex_init(&(storage_return->storage_mutex), NULL);
+    storage_t* storage_return = (storage_t*)malloc(sizeof(storage_t));
+    if(storage_return == NULL)
+        return NULL;
+    storage_return->files_limit = files_limit;
+    storage_return->memory_limit = memory_limit;
+    storage_return->files_number = 0;
+    storage_return->occupied_memory = 0;
+    storage_return->max_files_number = 0;
+    storage_return->max_occupied_memory = 0;
+    storage_return->times_replacement_algorithm = 0;
+    storage_return->mutex = rwlock_init();
+    if(storage_return->mutex == NULL)
+        return NULL;
+    storage_return->filenames_queue = list_create();
+    if(storage_return->filenames_queue == NULL){
+        rwlock_destroy(storage_return->mutex);
+        return NULL;
+    }
+    storage_return->files = icl_hash_create((int)files_limit, hash_pjw, string_compare);
+    if(storage_return->files == NULL){
+        rwlock_destroy(storage_return->mutex);
+        list_destroy(storage_return->filenames_queue, NULL);
+        return NULL;
+    }
+    for(int i = 0; i < MAX_CONN; i++){
+        storage_return->clients_waiting_lock[i] = -1;
+    }
 
     return storage_return;
 }
 
-void storage_free_key(void* key){
-    printf("LIBERO!!!!!!!!\n");
-    free(key);
-    key = NULL;
-}
-
+//TODO vedere quando fare la lock
 void storage_destroy(storage_t* storage){
 
     if(!storage)
         return;
 
+    //prima di eliminarlo stampa le statistiche
+    storage_printStats(storage);
+
     if(storage->files != NULL) {
-        icl_hash_destroy(storage->files, storage_free_key, (void (*)(void *)) file_clean);
+        icl_hash_destroy(storage->files, free, (void (*)(void *)) file_destroy);
         storage->files = NULL;
     }
 
-    if(storage->coda_file != NULL) {
-        list_destroy(storage->coda_file, NULL);
-        storage->coda_file = NULL;
+    if(storage->filenames_queue != NULL) {
+        list_destroy(storage->filenames_queue, free);
+        storage->filenames_queue = NULL;
+    }
+
+    if(storage->mutex != NULL){
+        rwlock_destroy(storage->mutex);
+        storage->mutex = NULL;
     }
 
     if(storage) {
@@ -57,189 +133,355 @@ void storage_destroy(storage_t* storage){
 
 }
 
-int storage_removeFile(storage_t* storage, char* filename, int filesize){
+//I file vuoti appena inseriti non causano nè subiscono espulsione
+//poiché sono visti come file di peso pari a 0.
+//L'espulsione avviene solo al momento della scrittura.
+int storage_openFile(storage_t* storage, char* filename, int flags, int client){
 
-    if(!storage || !filename)
-        return -1;
-
-    if(icl_hash_delete(storage->files, filename, storage_free_key, (void (*)(void *)) file_clean) == 0) {
-        storage->memoria_occupata-=filesize;
-        storage->numero_file--;
-        return 0;
-    }
-    else
-        return -1;
-
-}
-
-//restituisce il file_t espulso
-int storage_espelliFile(storage_t* storage, size_t necess_memory, list_t** expelledFiles){
-
-    if(necess_memory > storage->max_memoria){
-        return -1;
-    }
-
-    if(storage->max_memoria - storage->memoria_occupata < necess_memory || storage->numero_file == storage->max_file)
-        *expelledFiles = list_create();
-
-    if(!expelledFiles)
-        return -1;
-
-    while(storage->max_memoria - storage->memoria_occupata < necess_memory || storage->numero_file == storage->max_file){
-        char filename[MAX_FILENAME];
-        elem_t* toDestroy = get_tail(storage->coda_file);
-        strcpy(filename,  (char*)toDestroy->content); //problema qui, mi dice che toDestroy->content non è allocato
-        free(toDestroy);
-
-        file_t* victim = storage_findFile(storage, filename);
-        if(!victim)
-            continue;
-        else {
-            file_t* toSend = file_create(victim->nome_file, victim->dimensione_file, victim->contenuto_file, victim->client_lock);
-            if(!toSend)
-                return -1;
-
-            if( storage_removeFile(storage, filename, victim->dimensione_file) != 0)
-                return -1;
-
-            add_head_element(*expelledFiles, toSend);
-//TODO DEALLOCARE I FILE CHE POI VENGONO ESPULSI ????????
-
-        }
-    }
-    return 0;
-
-}
-
-int storage_addfile(storage_t* storage, file_t* file, char* filename, list_t** expelledFiles){
-
-    if(!file || !filename || !storage)
-        return -1;
-
-    //Se è stato raggiunto il numero massimo di file o se la memoria è piena devo espellere un file
-    if(storage->numero_file == storage->max_file || (storage->memoria_occupata + file->dimensione_file) > storage->max_memoria){
-        //ESPULSIONE FILE
-        storage_espelliFile(storage, file->dimensione_file, *&expelledFiles);
-        printf("ESPULSIONE\n");
-    }
-
-    if( icl_hash_insert(storage->files, (void*)filename, file) == NULL)
-        return -1;
-
-    else {
-        storage->numero_file++;
-        storage->memoria_occupata+= file->dimensione_file;
-    }
-
-    if(add_head_element(storage->coda_file, (void*)filename) != 0)
-        return -2;
-
-    return 0;
-
-}
-
-file_t* storage_findFile(storage_t* storage, const char* filename){
-
-    if(!storage || !filename)
-        return NULL;
-
-    file_t* found = icl_hash_find(storage->files, (void*)filename);
-
-    if(!found)
-        return NULL;
-
-    return found;
-}
-
-int storage_unlockFile(storage_t* storage, const char* filename, int client_fd){
-
-    if(!storage || !filename)
-        return -1;
-
-    file_t* modify = icl_hash_find(storage->files, (void*)filename);
-
-    if(!modify)
-        return -1;
-
-    //File non lockato
-    if(modify->client_lock == -1)
-        return 2;
-
-    if(modify->client_lock != client_fd)
-        return 1;
-
-    if(modify->client_lock == client_fd)
-        modify->client_lock = -1;
-
-    return 0;
-
-}
-
-int storage_lockFile(storage_t* storage, const char* filename, int client_fd){
-
-    if(!storage || !filename)
-        return -1;
-
-    file_t* modify = icl_hash_find(storage->files, (void*)filename);
-
-    if(!modify)
-        return -1;
-
-    if(modify->client_lock != -1 && modify->client_lock != client_fd)
-        return 1;
-    else
-        modify->client_lock = client_fd;
-
-    return 0;
-
-}
-
-int storage_writeFileContent(storage_t* storage, file_t* file, const char* filename, void* file_content, size_t len, int flags, list_t** expelledFiles){
-
-    if(!storage || !file_content || len > storage->max_memoria) {
+    if(!storage || !filename ){
         errno = EINVAL;
         return -1;
     }
 
-    if(file == NULL){
-        file = storage_findFile(storage, filename);
-        if(file == NULL)
-            return -1;
-    }
+    if(flags & O_CREATE){
+        //Con flag O_CREATE devo prima verificare se il file esiste già
+        //Acquisisco la mutua esclusione in scrittura per eventualmente aggiungere il file
+        if (rwlock_writerLock(storage->mutex) != 0) return FATAL;
 
-    //Controllo e salvo eventuali file da espellere
-    if(storage->max_file != 1) //Se c'è un solo file non si espelle perché è il file su cui devo scrivere
-        storage_espelliFile(storage, len, *&expelledFiles);
-
-    if(flags & O_REPLACE) { //Scrivi da zero
-
-        //Se nel file c'era qualcosa allora prima rimuovo tutto
-        if(file->dimensione_file != 0) {
-            storage->memoria_occupata -= file->dimensione_file;
-
-            if(file->contenuto_file)
-                free(file->contenuto_file);
-
-            file->dimensione_file = 0;
-            file->contenuto_file = NULL;
-            }
-
-        file->contenuto_file = malloc(len);
-        //Poi scrivo da zero
-        memcpy(file->contenuto_file, file_content, len);
-        file->contenuto_file = file_content;
-        file->dimensione_file = len;
-        storage->memoria_occupata += file->dimensione_file;
-
-    }else{
-        //Scrivi in append
-        if ( (file->contenuto_file = realloc(file->contenuto_file, file->dimensione_file + len)) == NULL){
-            perror("Malloc");
-            exit(EXIT_FAILURE);
+        if (icl_hash_find(storage->files, (void*)filename) != NULL){
+            if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+            errno = EEXIST;
+            return FAILURE;
         }
-        memcpy(file->contenuto_file + file->dimensione_file, file_content, len);
-        file->dimensione_file += len;
-        storage->memoria_occupata += len;
+
+        //Se il file non esiste lo creo
+        file_t* newFile = (file_t*) malloc(sizeof(file_t));
+        if(newFile == NULL) return FATAL;
+        newFile->who_opened = list_create();
+        newFile->content = NULL;
+        newFile->mutex = rwlock_init();
+        newFile->size = 0;
+        //Trasformo il numero client in stringa
+        char client_str[MAX_STRLEN];
+        snprintf(client_str, MAX_STRLEN, "%d", client);
+        unsigned long client_strlen = strlen(client_str);
+        char* client_mal = (char*)malloc( client_strlen*sizeof(char)+1);
+        client_mal[client_strlen] = '\0';
+        strcpy(client_mal,client_str);
+
+        list_append(newFile->who_opened, client_mal);
+        newFile->filename = (char*)malloc(strlen(filename)*sizeof(char)+1);
+        strcpy(newFile->filename, filename);
+        //Se è settato anche il flag di lock lo assegno al client
+        if(flags & O_LOCK)
+            newFile->client_locker = client;
+        else
+            newFile->client_locker = -1;
+
+        //Lo aggiungo
+        icl_hash_insert(storage->files,(void*)filename, (void*)newFile);
+        if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+
+        return SUCCESS;
+
     }
+
+    //Altrimenti procedo senza creazione del file
+
+    //Posso acquisire la mutua esclusione come lettore dato che non modifico la struttura
+    if (rwlock_readerLock(storage->mutex) != 0) return FATAL;
+    file_t* toOpen = NULL;
+    //Se il file non esiste fallisco dato che non ho specificato il flag di creazione
+    if ( (toOpen = icl_hash_find(storage->files, (void*)filename)) == NULL){
+        if (rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
+        return FAILURE;
+    }
+    if (rwlock_writerLock(toOpen->mutex) != 0) return FATAL;
+    if (rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+
+    if(flags & O_LOCK){ //TODO da cambiare deve agire come la lockfile!!
+        //Se c'è il flag O_LOCK settato controllo se è possibile fare la lock del file
+        if(toOpen->client_locker == -1 || toOpen->client_locker == client){
+            toOpen->client_locker = client; //Imposto il proprietario
+        }else{
+            //Altrimenti fallisco
+            if (rwlock_writerUnlock(toOpen->mutex) != 0) return FATAL;
+            errno = EACCES;
+            return FAILURE;
+        }
+    }
+    char client_str[MAX_STRLEN];
+    snprintf(client_str, MAX_STRLEN, "%d", client);
+    //Aggiungo il client alla lista di chi ha aperto il file solo se non lo aveva già aperto
+    if(list_get_elem(toOpen->who_opened, client_str, (void*)strcmp) == NULL){
+        unsigned long client_strlen = strlen(client_str);
+        char* client_mal = (char*)malloc( client_strlen*sizeof(char)+1);
+        client_mal[client_strlen] = '\0';
+        strcpy(client_mal,client_str);
+        if (list_append(toOpen->who_opened, client_mal) == NULL)
+            return FATAL;
+    }
+    if (rwlock_writerUnlock(toOpen->mutex) != 0) return FATAL;
+
+    free(filename);
+    return SUCCESS;
+}
+
+int storage_writeFile(storage_t* storage, const char* filename, size_t file_size, void* file_data, int client, list_t* list){
+    return -1;
+}
+
+int storage_lockFile(storage_t* storage, char* filename, int client){
+
+    if(!storage || !filename || client < 0){
+        errno = EINVAL;
+        return FAILURE;
+    }
+    file_t* toLock;
+
+    //Acquisisco readerLock sullo storage
+    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
+
+    //il file non esiste
+    if ( (toLock = icl_hash_find(storage->files, filename)) == NULL){
+        if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
+        return FAILURE;
+    }
+
+    //il file esiste, prendo la lock in scrittura sul file e rilascio lo storage
+    if(rwlock_writerLock(toLock->mutex) != 0) return FATAL;
+    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+
+    //controllo se il client ha aperto il file
+    char client_str[MAX_STRLEN];
+    snprintf(client_str, MAX_STRLEN, "%d", client);
+    if(list_get_elem(toLock->who_opened, client_str, (void*)strcmp) == NULL){
+        if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        errno = EPERM;
+        return FAILURE;
+    }
+
+    //il locker è già il client richiedente o è libero
+    if(toLock->client_locker == client || toLock->client_locker == -1){
+        toLock->client_locker = client;
+        if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        return SUCCESS;
+    }
+
+    //Un altro client è il locker
+    //Non posso completare la richiesta adesso, libero il thread da questo task
+    if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+
+    errno = EACCES;
+    return FAILURE;
+}
+
+int storage_unlockFile(storage_t* storage, const char* filename, int client){
+
+    if(!storage || !filename || client < 0){
+        errno = EINVAL;
+        return FAILURE;
+    }
+    file_t* toLock;
+
+    //Acquisisco readerLock sullo storage
+    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
+
+    //il file non esiste
+    if ( (toLock = icl_hash_find(storage->files, (void*)filename)) == NULL){
+        if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
+        return FAILURE;
+    }
+
+    //il file esiste, prendo la lock in scrittura sul file e rilascio lo storage
+    if(rwlock_writerLock(toLock->mutex) != 0) return FATAL;
+    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+
+    //controllo se il client ha aperto il file
+    char client_str[MAX_STRLEN];
+    snprintf(client_str, MAX_STRLEN, "%d", client);
+    if(list_get_elem(toLock->who_opened, client_str, (void*)strcmp) == NULL){
+        if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        errno = EPERM;
+        return FAILURE;
+    }
+
+    //il locker era il client richiedente OK
+    if(toLock->client_locker == client){
+        toLock->client_locker = -1;
+        if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        return SUCCESS;
+    }
+
+    //Nessuno è il locker
+    if(toLock->client_locker == -1){
+        if (rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        errno = EALREADY;
+        return FAILURE;
+    }
+
+    //Un altro client è il locker
+    if(toLock->client_locker != -1) {
+        if (rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
+        errno = EACCES;
+        return FAILURE;
+    }
+
+    return FAILURE;
+}
+
+int storage_closeFile(storage_t* storage, char* filename, int client){
+
+    if(!storage || !filename){
+        errno = EINVAL;
+        return -1;
+    }
+
+    if(rwlock_readerLock(storage->mutex) != 0 ) return FATAL;
+    file_t* toClose;
+    //Se il file che voglio chiudere non esiste
+    if ( (toClose = icl_hash_find(storage->files, filename)) == NULL){
+        if(rwlock_readerUnlock(storage->mutex) != 0 ) return FATAL;
+        errno = ENOENT;
+        return FAILURE;
+    }
+    //Prendo writelock sul file e rilascio lo storage
+    if(rwlock_writerLock(toClose->mutex) != 0) return FATAL;
+    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+
+    //Controllo che il client sia tra quelli che hanno aperto il file
+    char client_str[MAX_STRLEN];
+    snprintf(client_str, MAX_STRLEN, "%d", client);
+    //Se non c'è
+    elem_t* removedElem;
+    if((removedElem = list_remove_elem(toClose->who_opened, client_str, (void*)strcmp)) == NULL){
+        if(rwlock_writerUnlock(toClose->mutex) != 0) return FATAL;
+        errno = EALREADY; //operazione già effettuata
+        return FAILURE;
+    }else{ //Altrimenti ho correttamente rimosso il client dalla lista
+        //libero le risorse
+        free(removedElem->content);
+        free(removedElem);
+        if(rwlock_writerUnlock(toClose->mutex) != 0) return FATAL;
+        return SUCCESS;
+    }
+
+}
+
+int storage_removeFile(storage_t* storage, char* filename, int client){
+
+    if(!storage || !filename){
+        errno = EINVAL;
+        return -1;
+    }
+
+    //Dato che vado a modificare la struttura dello storage entro come scrittore
+    //in modo da essere l'unico ad operare
+    if(rwlock_writerLock(storage->mutex) != 0) return FATAL;
+    file_t* toRemove;
+    //Se il file non esiste
+    if((toRemove = icl_hash_find(storage->files, filename)) == NULL){
+        if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
+        return FAILURE;
+    }
+    //Se il file esiste prendo la writerLock prima
+    if(rwlock_writerLock(toRemove->mutex) != 0) return FATAL;
+    //Controllo se il client ha fatto la lock
+    if(toRemove->client_locker == client){
+        //qui posso procedere
+
+        if(toRemove->size > 0){
+            //Se il file aveva effettivamente un contenuto allora modifico i numero di file e la memoria occupata
+            storage->occupied_memory -= toRemove->size;
+            storage->files_number--;
+            elem_t* toRemove_elem = list_remove_elem(storage->filenames_queue, filename, (void*)strcmp);
+            if(!toRemove_elem) return FATAL;
+            free(toRemove_elem->content);
+            free(toRemove);
+        }
+        //Elimino dalla tabella dei file
+        if (icl_hash_delete(storage->files, filename, free, (void*)file_destroy) != 0) return FATAL;
+
+        //Rilascio la lock sullo storage solo alla fine
+        if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+
+        return SUCCESS;
+
+    }else{//Il client non è il locker
+        if(rwlock_writerUnlock(toRemove->mutex) != 0) return FATAL;
+        if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+        errno = EACCES;
+        return FAILURE;
+    }
+
+}
+
+
+
+int storage_addClientWaiting(storage_t* storage, int client){
+
+    if(!storage || client < 0){
+        errno = EINVAL;
+        return FAILURE;
+    }
+
+    if (rwlock_writerLock(storage->mutex) != 0) return FATAL;
+    int i;
+    for(i = 0 ; i < MAX_CONN; i++){
+        if(storage->clients_waiting_lock[i] != -1)
+            continue;
+        else{
+            storage->clients_waiting_lock[i] = client;
+            break;
+        }
+    }
+    if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+
+    if(i == MAX_CONN) //significa che non ho trovato spazio per aggiungere il client
+        return FAILURE;
+
+    return SUCCESS;
+}
+
+int storage_removeClientWaiting(storage_t* storage){
+
+    if(!storage){
+        errno = EINVAL;
+        return FAILURE;
+    }
+
+    if (rwlock_writerLock(storage->mutex) != 0) return FATAL;
+    for(int i = 0; i < MAX_CONN; i++){
+        if(storage->clients_waiting_lock[i] != -1) {
+            int result = storage->clients_waiting_lock[i];
+            storage->clients_waiting_lock[i] = -1;
+            if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+            return result;
+        }
+    }
+    if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+
+    return FAILURE;
+}
+
+int storage_printStats(storage_t* storage){
+
+    if(!storage)
+        return -1;
+
+    printf("\n=========== STATISTICHE FILE STORAGE ===============\n");
+    printf("Numero massimo di file raggiunto: %d\n", storage->max_files_number);
+    printf("Dimensione massima della memoria occupata %llu MB\n", (storage->max_occupied_memory)/1024/1024 );
+    printf("Algoritmo di rimpiazzamento eseguito %d volte\n", storage->times_replacement_algorithm);
+    printf("----- FILES ------\n");
+    list_printAsString(storage->filenames_queue);
+    printf("-------------------\n");
+    printf("\n====================================================\n");
+
     return 0;
+
 }

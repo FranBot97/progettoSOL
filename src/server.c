@@ -1,32 +1,312 @@
-
-#include <storage.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
-#include <errno.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <sys/un.h>
-#include <sys/stat.h>
 #include <sys/select.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <limits.h>
+//#include <sys/stat.h>
+//#include <errno.h>
+
 #include <threadpool.h>
 #include <request.h>
 #include <request_handler.h>
 #include <util.h>
-#include <signal.h>
 
-#define MAX_PATH 108
-#define LINE_MAX 128
-#define MAX_CONN 20
+//Funzione che calcola max fd
+int updatemax(fd_set set, int fdmax);
 
-/*calcol maxfd*/
+//Funzione che legge un'intera linea del file di configurazione
+int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
+
+//Funzione che legge tutto il file di configurazione e inizializza i parametri
+int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
+
+//Gestore segnali
+bool NO_MORE_CONNECTIONS = false;
+bool NO_MORE_REQUESTS = false;
+void signals_check(int sig);
+
+
+
+
+
+/****************************/
+//      MAIN START
+/***************************/
+int main(int argc, char* argv[]) {
+
+    printf("Server avviato\n");
+    if(argc < 3){
+        printf("Esegui come: server -f <nome_file.txt>\n");
+        goto exit;
+    }
+    printf("================ INIZIALIZZAZIONE SERVER IN CORSO ==================\n");
+
+    //DICHIARAZIONE VARIABILI
+    int socket_fd = -1;
+    char NOME_SOCKET[MAX_PATH] = "";
+    storage_t* myStorage = NULL;
+    threadpool_t* workers = NULL;
+    request_t *req = NULL;
+    int NUMERO_WORKERS = 0;
+    int MAX_FILE = 0;
+    int MAX_MEMORIA = 0;
+    int REPLACE_MODE = 0; //0 = FIFO, 1 = LRU
+    int pfd[2]; //pipe
+
+    //GESTIONE SEGNALI
+    struct sigaction sig_action;
+    sigset_t sigset;
+    memset(&sig_action, 0, sizeof(sig_action));
+    sig_action.sa_handler = signals_check;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGINT);
+    sigaddset(&sigset, SIGHUP);
+    sigaddset(&sigset, SIGQUIT);
+    sig_action.sa_mask = sigset;
+    if (sigaction(SIGINT, &sig_action, NULL)!= 0
+    ||  sigaction(SIGHUP, &sig_action, NULL)!=0
+    ||  sigaction(SIGQUIT, &sig_action, NULL)!=0
+    ||  sigaction(SIGPIPE, &sig_action, NULL)!=0) {
+        goto cleanup;
+    }
+
+
+    //LETTURA FILE CONFIGURAZIONE
+     int opt;
+     while( ( opt = getopt(argc, argv, ":f:") ) != -1 ){
+         switch (opt) {
+             case 'f':
+                if ( read_config_file(optarg,
+                                      NOME_SOCKET,
+                                      &NUMERO_WORKERS,
+                                      &MAX_FILE,
+                                      &MAX_MEMORIA,
+                                      &REPLACE_MODE) == -1)
+                    goto cleanup;
+                 break;
+             case ':':
+                 printf("Il comando -f richiede un argomento\n");
+                 goto cleanup;
+             case '?':
+             default:
+                 printf("Comando non riconosciuto\n");
+                 goto cleanup;
+         }
+     }
+
+     //INIZIALIZZAZIONE DOPO LETTURA FILE
+
+     //PIPE: pfd[0] per lettura, pfd[1] scrittura
+     if(pipe(pfd) == -1){
+         printf("Errore nella creazione della pipe\n");
+         goto cleanup;
+     }
+     //STORAGE:
+     myStorage = storage_create(MAX_FILE, MAX_MEMORIA * (1024 * 1024), REPLACE_MODE);
+     if(myStorage == NULL) {
+         printf("Errore nella creazione del file storage\n");
+         goto cleanup;
+     }else{
+         printf("- File storage creato correttamente\n");
+     }
+    //THREADPOOL:
+     workers = createThreadPool(NUMERO_WORKERS, 10);
+     if(workers == NULL){
+         printf("Errore nella creazione del threadpool\n");
+         goto cleanup;
+     }else{
+         printf("- Threadpool creato correttamente\n");
+     }
+     //CREAZIONE SOCKET:
+     unlink(NOME_SOCKET);
+     if ( (socket_fd = socket(AF_UNIX, SOCK_STREAM,0) ) == -1){
+        perror("Creazione socket");
+        goto cleanup;}
+     struct sockaddr_un serv_addr;
+     memset(&serv_addr, 0, sizeof(serv_addr));
+     serv_addr.sun_family = AF_UNIX;
+     strncpy(serv_addr.sun_path, NOME_SOCKET, SOCKET_LEN);
+     if ( bind(socket_fd, (struct sockaddr*)&serv_addr,sizeof(serv_addr)) == -1){
+       perror("Bind fallita");
+       goto cleanup;}
+     if(  listen(socket_fd, MAX_CONN)  == -1 ){
+       perror("Listen fallita");
+       goto cleanup;}
+     printf("- Socket creata correttamente\n");
+
+     printf("----- PARAMETRI ------ \n");
+     printf("Numero massimo file: %d\n", MAX_FILE);
+     printf("Capacità memoria file storage: %d MB\n", MAX_MEMORIA);
+     printf("Numero di thread workers: %d\n", NUMERO_WORKERS);
+     printf("Modalità rimpiazzamento: %s\n", (REPLACE_MODE == 0 ? "FIFO" : "NULL"));
+     printf("=============== FINE INIZIALIZZAZIONE SERVER ==================\n");
+
+     //PARAMETRI SELECT
+     int connected_clients = 0;
+     fd_set set, rdset;
+     FD_ZERO(&set);
+     FD_ZERO(&rdset);
+     FD_SET(socket_fd, &set);
+     FD_SET(pfd[0], &set);
+     int fdmax = (socket_fd > pfd[0] ? socket_fd : pfd[0]);
+
+     printf(" In attesa di nuove connessioni...  \n");
+     while(true){
+       rdset = set;
+
+       if(select(fdmax+1, &rdset, NULL, NULL, NULL) == -1){
+           perror("select");
+           goto cleanup;
+       }
+       //esamino i fd
+       for(int i=0; i <= fdmax; i++){
+
+           //Se non accetto più nessuna richiesta esco
+            if(NO_MORE_REQUESTS == true){
+                goto cleanup;
+            }
+            //Se non accetto più nuove connessioni e tutti i client attivi si sono disconnessi esco
+            if(NO_MORE_CONNECTIONS == true && connected_clients == 0){
+                goto cleanup;
+            }
+
+           //Se c'è una richiesta di lettura
+           if(FD_ISSET(i, &rdset)) {
+               long connfd;
+
+               //Controllo se è una richiesta di connessione
+               if (i == socket_fd && NO_MORE_CONNECTIONS == false) {
+                   connfd = accept(socket_fd, (struct sockaddr *) NULL, NULL);
+                   if(connfd == -1)
+                       continue;
+
+                   printf("Client %ld connesso\n", connfd);
+                   connected_clients++;
+                   FD_SET(connfd, &set);
+                   if (connfd > fdmax)
+                       fdmax = (int)connfd;
+                   continue;
+               }
+
+               //Controllo se è la pipe di un thread che mi comunica di aver finito la gestione di una richiesta
+               //così posso rimettere tra i descrittori da analizzare il client
+               if (i == pfd[0]) {
+                   int client_to_add;
+                   if (read(pfd[0], &client_to_add, sizeof(int)) > 0) {
+                       //printf("Il client da riaggiungere e' %d\n", client_to_add);
+                       FD_SET(client_to_add, &set);
+                       if (client_to_add > fdmax)
+                           fdmax = client_to_add;
+                       continue;
+                   } else {
+                       printf("Errore lettura pipe\n");
+                       continue;
+                   }
+               }
+
+               //Altrimenti è una richiesta da parte di un client
+               connfd = i;
+               int opcode = 0;
+               //Leggo il codice operazione
+               if (readn(connfd, &opcode, sizeof(int)) <= 0) {
+                   //Se c'è un errore nella lettura chiudo la connessione con il client
+                   printf("Client %ld disconnesso\n", connfd);
+                   connected_clients--;
+                   FD_CLR(connfd, &set);
+                   close((int)connfd);
+                   continue;
+               }
+               //Se è una SHUTDOWN del server
+               if (opcode == SHUTDOWN) {
+                   FD_CLR(connfd, &set);
+                   close((int)connfd);
+                   goto cleanup;
+               }
+
+               //Creo una nuova richiesta
+               req = (request_t *) malloc(sizeof(request_t));
+               if(req == NULL){
+                   perror("Errore fatale malloc");
+                   exit(EXIT_FAILURE);
+               }
+               req->opcode = opcode;
+               req->client_fd = connfd;
+               req->storage = myStorage;
+               req->pipe_write = pfd[1];
+
+               //Se la richiesta non è una shutdown allora è una richiesta da gestire nel pool
+               if (addToThreadPool(workers,(void *) request_handler_function,req) == -1) {
+                   //Se c'è un errore col threadpool comunico fallimento al client
+                   int error = FAILURE;
+                   writen(connfd, &error, sizeof(int));
+                   continue;
+               }
+               //printf("Richiesta inviata al thread\n");
+               //Rimuovo il client dal set perché adesso viene gestito dal nuovo thread
+               FD_CLR(connfd, &set);
+               if (connfd == fdmax)
+                   fdmax = updatemax(set, fdmax);
+           }
+       }
+     }
+
+     //FASE FINALE DI CLEANUP
+     cleanup:
+     if(workers)
+        destroyThreadPool(workers, 0);
+     if(myStorage)
+        storage_destroy(myStorage);
+     if(socket_fd != -1)
+        close(socket_fd);
+
+     //EXIT
+     exit:
+     if(!strcmp(NOME_SOCKET,"")) unlink(NOME_SOCKET);
+
+     return 0;
+}
+
+
+
+
+/********************* FUNZIONI AGGIUNTIVE **************************/
+
 int updatemax(fd_set set, int fdmax){
     for(int i = (fdmax-1); i >= 0; --i)
         if (FD_ISSET(i, &set)) return i;
     //assert(1==0);
     return -1;
+}
+
+//SIGINT, SIGTERM, SIGQUIT ---> NO_MORE_CONNECTIONS = true; NO_MORE_REQUESTS = true;
+//SIGHUP --> NO_MORE_CONNECTIONS = true; NO_MORE_REQUESTS = false;
+void signals_check(int sig){
+
+        switch (sig)
+        {
+            case SIGINT:
+           // case SIGTERM:
+            case SIGQUIT:
+                NO_MORE_CONNECTIONS = true;
+                NO_MORE_REQUESTS = true;
+                break;
+
+            case SIGHUP:
+                NO_MORE_CONNECTIONS = true;
+                NO_MORE_REQUESTS = false;
+                break;
+
+            case SIGPIPE:
+            default:
+                break;
+
+        }
 }
 
 
@@ -44,7 +324,7 @@ int updatemax(fd_set set, int fdmax){
  * @returns 0 se non ci sono errori, -1 in caso di errore
  */
 int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
-               int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO) {
+              int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO) {
 
     char *ptr;
     long n = 0;
@@ -78,7 +358,10 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
             printf("Input file configurazione non valido\n");
             return -1;
         }
-        *NUMERO_WORKERS = n;
+        if(n > INT_MAX)
+            *NUMERO_WORKERS = INT_MAX;
+        else
+            *NUMERO_WORKERS = (int)n;
         return 0;
     }
 
@@ -93,7 +376,10 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
             printf("Input file configurazione non valido\n");
             return -1;
         }
-        *LIMITE_FILE = n;
+        if(n > INT_MAX)
+            *LIMITE_FILE = INT_MAX;
+        else
+            *LIMITE_FILE = (int)n;
         return 0;
     }
 
@@ -108,7 +394,11 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
             printf("Input file configurazione non valido\n");
             return -1;
         }
-        *LIMITE_MB = strtol(token, &ptr, 10);
+        long mb = strtol(token, &ptr, 10);
+        if(mb > INT_MAX)
+            *LIMITE_MB = INT_MAX;
+        else
+            *LIMITE_MB = (int)n;
         return 0;
     }
 
@@ -131,7 +421,8 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
         printf("Modalità di rimpiazzamento non valida, modalità disponibili: FIFO, LRU\n");
         return -1;
     }
-return -1;}
+    return -1;}
+
 
 /**
  * @brief Apre e legge il file di configurazione e inizializza i parametri.
@@ -149,7 +440,7 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKE
                      int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO){
     FILE *ptr;
     char* line;
-    line = (char*)malloc(LINE_MAX*(sizeof(char)) +1 );
+    line = (char*)malloc(MAX_LINE*(sizeof(char)) +1 );
     if(!line) return -1;
 
     if( ( ptr =  fopen(config_filename, "r" ) ) == NULL){
@@ -158,7 +449,7 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKE
         return -1;
     }
 
-    while(fgets(line, LINE_MAX, ptr ) != NULL ){
+    while(fgets(line, MAX_LINE, ptr ) != NULL ){
         if(read_line(line, NOME_SOCKET, NUMERO_WORKERS, LIMITE_FILE, LIMITE_MB, METODO_RIMPIAZZAMENTO) == -1) {
             free(line);
             fclose(ptr);
@@ -167,266 +458,5 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKE
     }
     free(line);
     fclose(ptr);
-    return 0;
-}
-
-
-static void* signals_check(void* write_fd){
-
-    int writefd = *(int*)write_fd;
-    printf("%d test\n", writefd);
-    return NULL;
-}
-
-
-/****GLOBALI O NO ? ************TODO*/
-char NOME_SOCKET[MAX_PATH] = "";
-storage_t* myStorage = NULL;
-threadpool_t* workers = NULL;
-
-
-int main(int argc, char* argv[]) {
-
-    printf("Server avviato\n");
-    //printf("%d\n", argc);
-    if(argc < 3){
-        printf("Esegui come: server -f <nome_file.txt>\n");
-        goto exit;
-    }
-
-    /*****VARIABILI SERVER******/
-    int NUMERO_WORKERS = 0;
-    int MAX_FILE = 0;
-    int MAX_MEMORIA = 0;
-    int REPLACE_MODE = 0; //0 = FIFO, 1 = LRU
-    //pthread_mutex_t file_storage;
-    //pthread_mutex_t files_mutex;
-    int pfd[2]; //pipe
-    sigaction(SIGPIPE, &(struct sigaction){{SIG_IGN}}, NULL);
-    //signal(SIGINT, )
-
-    /*******THREAD GESTORE SEGNALI***********/
-    pthread_t signal_tid;
-    int err;
-    int signals[2];
-    if(pipe(signals) == -1){
-        printf("Errore nella creazione della pipe\n");
-        goto cleanup;
-    }
-    printf("%d e %d \n", signals[0], signals[1]);
-    //signals[0] per lettura
-    //signals[1] scrittura
-  //  signal(SIGINT, intHandler);
-    err = pthread_create(&signal_tid, NULL, signals_check, (void*)&signals[1] );
-    if(err != 0)
-        goto cleanup;
-    /***** FINE VARIABILI SERVER *****/
-
-    /**** LETTURA FILE ****/
-    int opt;
-     while( ( opt = getopt(argc, argv, ":f:") ) != -1 ){
-         switch (opt) {
-             case 'f':
-                if ( read_config_file(optarg,
-                                      NOME_SOCKET,
-                                      &NUMERO_WORKERS,
-                                      &MAX_FILE,
-                                      &MAX_MEMORIA,
-                                      &REPLACE_MODE) == -1)
-                    goto cleanup;
-                 break;
-             case ':':
-                 printf("Il comando -f richiede un argomento\n");
-                 goto cleanup;
-             case '?':
-                 printf("Comando non riconosciuto\n");
-                 goto cleanup;
-
-             default:
-                 printf("Comando non riconosciuto\n");
-                 goto cleanup;
-         }
-     }
-
-     /*** INIZIALIZZAZIONE DOPO LETTURA FILE ***/
-     if(pipe(pfd) == -1){
-         printf("Errore nella creazione della pipe\n");
-         goto cleanup;
-     }
-     //pfd[0] per lettura
-     //pfd[1] scrittura
-
-     myStorage = storage_create(MAX_FILE, MAX_MEMORIA, REPLACE_MODE);
-     if(myStorage == NULL) {
-         printf("Errore nella creazione del file storage\n");
-         goto cleanup;
-     }else{
-         printf("file storage creato correttamente\n");
-         //goto clean;
-     }
-
-     workers = createThreadPool(NUMERO_WORKERS, 10);
-     if(workers == NULL){
-         printf("Errore nella creazione del threadpool\n");
-         goto cleanup;
-     }else{
-         printf("Threadpool creato correttamente\n");
-         //goto clean;
-     }
-
-   //pthread_mutex_init(&file_storage, NULL); //TODO check errors
-   // pthread_mutex_init(&files_mutex, NULL); //TODO check
-
-    //INIZIO CREAZIONE SOCKET
-    int socket_fd;
-    unlink(NOME_SOCKET);
-    if ( (socket_fd = socket(AF_UNIX, SOCK_STREAM,0) ) == -1){
-        perror("Creazione socket");
-        goto cleanup;}
-    struct sockaddr_un serv_addr;
-    memset(&serv_addr, '0', sizeof(serv_addr));
-    serv_addr.sun_family = AF_UNIX;
-    strncpy(serv_addr.sun_path, NOME_SOCKET, MAX_PATH);
-   if ( bind(socket_fd, (struct sockaddr*)&serv_addr,sizeof(serv_addr)) == -1){
-       perror("Bind fallita");
-       goto cleanup;}
-   if(  listen(socket_fd, MAX_CONN)  == -1 ){
-       perror("Listen fallita");
-       goto cleanup;}
-    printf("Socket creata\n");
-   //FINE CREAZIONE SOCKET
-
-   //SELECT
-   fd_set set, rdset;
-   FD_ZERO(&set);
-   FD_ZERO(&rdset);
-   FD_SET(socket_fd, &set);
-   FD_SET(pfd[0], &set);
-   int fdmax = (socket_fd > pfd[0] ? socket_fd : pfd[0]);
-
-   while(true){
-       rdset = set;
-
-       if(select(fdmax+1, &rdset, NULL, NULL, NULL) == -1){
-           perror("select");
-           goto cleanup;
-       }
-       //esamino i fd
-       for(int i=0; i <= fdmax; i++){
-
-           //Se c'è una richiesta di lettura
-           if(FD_ISSET(i, &rdset)) {
-               int connfd;
-
-               //Controllo se è una richiesta di connessione
-               if (i == socket_fd) {
-                   connfd = accept(socket_fd, (struct sockaddr *) NULL, NULL);
-                   printf("Nuovo client %d connesso\n", connfd);
-                   FD_SET(connfd, &set);
-                   if (connfd > fdmax)
-                       fdmax = connfd;
-                   continue;
-               }
-
-               //Controllo se è la pipe
-               else if (i == pfd[0]) {
-                   int client_to_add;
-                   if (read(pfd[0], &client_to_add, sizeof(int)) > 0) {
-                       printf("Il client da riaggiungere e' %d\n", client_to_add);
-                       FD_SET(client_to_add, &set);
-                       if (client_to_add > fdmax)
-                           fdmax = client_to_add;
-                       continue;
-                   } else {
-                       printf("Errore lettura pipe\n");
-                       continue;
-                   }
-
-               } else{
-                   //Altrimenti è una richiesta da parte di un client, assegno il task ad un thread
-                   connfd = i;
-                   int len = 0;
-
-                   if (readn(connfd, &len, sizeof(int)) <= 0) {
-                       FD_CLR(connfd, &set);
-                       close(connfd);
-                       continue;
-                   }
-
-                   //Creo una nuova richiesta
-                   request_t *req = (request_t *) malloc(sizeof(request_t)); //TODO check
-                   req->command = NULL;
-                   req->len = len;
-                   req->client_fd = connfd;
-                //   req->storage_mutex = &file_storage;
-               //    req->files_mutex = &files_mutex;
-                   req->myStorage = myStorage;
-                   req->pipe_write = pfd[1];
-
-                   printf("Nuova richiesta lunga %d\n", req->len);
-
-                   //req->command = (char *) malloc(req->len * sizeof(char)+1);
-                   req->command = calloc(len, sizeof(char)+1);
-                   if (req->command == NULL)
-                       printf("error malloc\n");
-                  // memset(req->command, '0', sizeof(char)*req->len);
-
-                   if (readn(connfd, req->command, req->len * sizeof(char)) <= 0) {
-                       close(connfd);
-                       FD_CLR(connfd, &set);
-                       printf("Errore lettura richiesta\n");
-                       if (connfd == fdmax)
-                           fdmax = updatemax(set, fdmax);
-                   } else {
-                       printf("RICHIESTA RICEVUTA %s\n", req->command);
-                       //TODO finchè non gestisco i segnali uso quit
-                       //FINCHE' NON USO SEGNALI USO "QUIT" COME PAROLA DI TERMINAZIONE SERVER
-                       //INVIATA DA UN CLIENT
-                       if (strcmp(req->command, "quit") == 0) {
-                           printf("RICHIESTA RICEVUTA %s\n", req->command);
-                           FD_CLR(connfd, &set);
-                           close(connfd);
-                           if (req) {
-                               if (req->command) {
-                                   free(req->command);
-                                   req->command = NULL;
-                               }
-                               free(req);
-                               req = NULL;
-                           }
-                           goto cleanup;
-                      //     continue;
-
-                       }
-
-                       //Se la richiesta non è una quit allora è una richiesta da gestire nel pool
-                       if (addToThreadPool(workers,(void *) request_handler_function,req) == -1) {
-                           //Se c'è un errore col threadpool
-                           writen(connfd, "Servizio non disponibile\n", 26);
-                           continue;
-                       };
-                       printf("Richiesta inviata al thread\n");
-                       //Rimuovo il client dal set perché adesso viene gestito dal nuovo thread
-                       FD_CLR(connfd, &set);
-                       if (connfd == fdmax)
-                           fdmax = updatemax(set, fdmax);
-                   }
-               }
-           }
-       }
-   }
-   //FINE SELECT
-
-    /*** INIZIO PULIZIA MEMORIA ***/
-    cleanup:
-    if(myStorage)
-        storage_destroy(myStorage);
-    if(workers)
-        destroyThreadPool(workers, 0);
-    pthread_join(signal_tid, NULL);
-
-    /***  FINE PULIZIA MEMORIA ***/
-    exit:
-    if(!strcmp(NOME_SOCKET,"")) unlink(NOME_SOCKET);
     return 0;
 }

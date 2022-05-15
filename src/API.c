@@ -1,46 +1,22 @@
-//
-// Created by linuxlite on 01/03/22.
-//
 //TODO controlla strncpy strlen ecc.. e gli invii delle stringhe
+//TODO decidere se fare perror dentro API o fuori (meglio fuori per coerenza)
 #include <time.h>
 #include <stdbool.h>
 #include <list.h>
 #include <unistd.h>
 #include <sys/un.h>
 #include <API.h>
-#include <file.h>
+#include <util.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <dirent.h>
-#define EISZERO "File is empty"
+#include <sys/socket.h>
+#include <request.h>
 
 static bool connected = false;
 static int socket_fd = -1;
 char mySockname[MAX_SOCKNAME] = "";
-char last_file_opened[MAX_FILENAME] = "";
-list_t* locked_files = NULL; //Usare una richiesta per questo? Andare a cercare tutti i files?
-//eventuale file espulso dalla openFile con flag O_CREATE che precede una writeFile
-char expelled_file_name[MAX_FILENAME] = "";
-void* expelled_file_content = NULL;
-size_t expelled_file_size = 0;
-
-enum  operations_ {
-    NULL_op = -1,
-    openConnection_op = 0,
-    openFile_simple_op = 1,
-    openFile_CREATE_op = 2,
-    openFile_CREATE_LOCK_op = 3,
-    openFile_LOCK_op = 4,
-    closeConnection_op = 5,
-    lockFile_op = 6,
-    unlockFile_op = 7
-};
-enum operations_ last_op = NULL_op;
-
-enum flags_   {
-    O_CREATE = 1 << 0,
-    O_LOCK  = 1 << 1
-};
+char lastOpenedFlags[MAX_FILENAME] =""; //Per la writeFile: ultimo file su cui è stata eseguita una open con O_CREATE | O_LOCK
 
 int openConnection(const char* sockname, int msec, const struct timespec abstime){
 
@@ -61,12 +37,14 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 
     socket_fd = socket(AF_UNIX,SOCK_STREAM,0); //sets errno
     if(socket_fd == -1) {
+        if(errno != 0)
+            perror("Open Connection");
         return -1;
     }
 
     //Inizializzazione socket
     struct sockaddr_un serv_addr;
-    memset(&serv_addr, '0', sizeof(serv_addr));
+    memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sun_family = AF_UNIX;
     strncpy(serv_addr.sun_path, sockname, MAX_SOCKNAME-1);
 
@@ -85,19 +63,16 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
     }
     if(isConnected != 0) {
         printf("Connessione fallita, riprovare\n");
+        errno = isConnected;
+        perror("Open Connection");
         return -1;
     }
 
     //Se va a buon fine inizializzo i parametri
     connected = true;
     printf("Connesso con successo\n");
-    locked_files = list_create();
-    strncpy(last_file_opened, "", MAX_FILENAME-1);
-    strncpy(mySockname, sockname, MAX_SOCKNAME-1);
-    last_op = openConnection_op;
     return 0;
 }
-
 
 int closeConnection(const char* sockname){
 
@@ -116,25 +91,11 @@ int closeConnection(const char* sockname){
         return -1;
     }
 
-    //libero tutti i file lockati dal client
-    char filename[MAX_FILENAME];
-    if(locked_files != NULL){
-        while (locked_files->num_elem > 0) {
-            elem_t* toDestroy = get_head(locked_files);
-            strncpy(filename, toDestroy->content, MAX_FILENAME-1);
-            //printf("%s\n", filename);
-            unlockFile(filename);
-            free(toDestroy);
-
-            //aspetto responso
-           // pointer = pointer->next;
-        }
+    if (close(socket_fd) != 0 ){
+        perror("Close connection");
+        return -1;
     }
 
-    if (close(socket_fd) != 0 )
-        return -1;
-
-    reset();
     return 0;
 }
 
@@ -148,7 +109,7 @@ int openFile(const char* pathname, int flags){
         errno = EINVAL;
         return -1;
     }
-    if(strlen(pathname) > MAX_FILENAME){
+    if(strlen(pathname) > MAX_PATH){
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -158,113 +119,87 @@ int openFile(const char* pathname, int flags){
     strcpy(pathname_to_parse, pathname);
     char filename[MAX_FILENAME];
     parseFilename(pathname_to_parse, filename);
-
-    char* request;
-    enum operations_ op = NULL_op;
-
-    //Controllo se ho settato sia O_CREATE che O_LOCK
-    if( (flags & O_CREATE) && (flags & O_LOCK) ){
-        request = "OPEN_FILE_CREATE_LOCK";
-        op = openFile_CREATE_LOCK_op;
-    } //Altrimenti guardo se c'è solo O_CREATE
-    else if(flags & O_CREATE){
-        request = "OPEN_FILE_CREATE";
-        op = openFile_CREATE_op;
-        }
-    //Altrimenti guardo se c'è solo O_LOCK
-    else if(flags & O_LOCK){
-        request = "OPEN_FILE_LOCK";
-        op = openFile_LOCK_op;
-        }
-    //Nessun flag settato
-    else{
-        request = "OPEN_FILE";
-        op = openFile_simple_op;
-    }
-
-    //Invio la richiesta al server
-    if (sendToServer(request, strlen(request),"request") != 0) {
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
         return -1;
     }
+    int opcode = OPEN;
 
-    //Invio anche il nome del file
-    unsigned long len = strlen(filename);
-    if (sendToServer((void*)filename, len, "string") != 0){
-        return -1;
-    }
+    //Invio dati al server, nell'ordine: codice op, flags, lunghezza nome file, nome file
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &flags, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
 
     //Aspetto risposta
-    char* response = recieveFromServer("string");
-    if(response == NULL)
-        return -1;
+    int response = -1;
+    if ( readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+    if (readn(socket_fd, &errno, sizeof(int)) <= 0) return -1;
 
-    //Se è stata una openFile con flag O_CREATE il server potrebbe aver espulso 1 file
+    if(response != 0)
+        perror("Openfile");
+    else //Se non ci sono stati errori
+        if( flags == ( O_CREATE|O_LOCK )) strcpy(lastOpenedFlags, filename);
+
+    return response;
+
+    //TODO
+    //Se è stata una server_openFile con flag O_CREATE il server potrebbe aver espulso 1 file
     //per far posto a quello appena creato. Ne salvo il nome e il contenuto e la dimensione per
     //poterlo aggiungere alla lista dei file espulsi nel caso l'operazione successiva
     //fosse una writeFile( pathname , ... )
-   if(strncmp(response, "EXPELLED", 8) == 0){
 
-       //Leggo il nome del file espulso
-        char* filename_expelled = recieveFromServer("string");
-        strcpy(expelled_file_name, filename_expelled);
-        //Leggo la dimensione del file espulso
-        size_t file_len = 0;
-        readn(socket_fd, &file_len, sizeof(unsigned long));
-        void *file_content = NULL;
-        if(file_len != 0) {
-           //Leggo il contenuto del file espulso
-           file_content = malloc(file_len);
-       }
-        expelled_file_size = file_len;
+}
 
-        if(!file_content && file_len != 0){
-            free(filename_expelled);
-            free(response);
-            return -1;
-        }
-        if(file_len != 0)
-            readn(socket_fd, file_content, file_len);
+int closeFile(const char* pathname){
 
-        expelled_file_content = file_content;
-        printf("File espulso %s\n", filename_expelled);
-
-        response = recieveFromServer("string");
-        if(strcmp(response, "STOP") == 0){
-            //OK - non necessario
-        }
-    }else{
-       //Se non ci sono file espulsi pulisco le variabili
-       strcpy(expelled_file_name, "");
-       if(expelled_file_content) {
-           free(expelled_file_content);
-           expelled_file_content = NULL;
-       }
-       expelled_file_size = 0;
-   }
-
-    if(strncmp(response, "OK", 2) == 0) {
-        strcpy(last_file_opened, pathname);
-        if(flags & O_LOCK)
-            add_head_element(locked_files, (void*)pathname);
-        last_op = op;
-        free(response);
-        return 0;
-    }//Se ho ricevuto dei file espulsi
-    else {
-        free(response); //TODO errno
+    if(connected == false) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    if(!pathname){
+        errno = EINVAL;
+        return -1;
+    }
+    if(strlen(pathname) > MAX_PATH){
+        errno = ENAMETOOLONG;
         return -1;
     }
 
-    return 0;
-}
+    //Parsing nome del file
+    char pathname_to_parse[MAX_ARGLEN];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    int opcode = CLOSE;
 
-int readFile(const char* pathname, void** buf, size_t* size){
+    //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
 
-    return 0;
-}
+    //Aspetto risposta
+    int response = -1;
+    if ( readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+    if (readn(socket_fd, &errno, sizeof(int)) <= 0) return -1;
 
-int readNFiles(int N, const char* dirname){
-    return 0;
+    if(response != 0)
+        perror("Close file");
+    else
+        if(strcmp(lastOpenedFlags, filename) == 0) strcpy(lastOpenedFlags, "");
+
+    return response;
+
 }
 
 int writeFile(const char* pathname, const char* dirname){
@@ -273,286 +208,284 @@ int writeFile(const char* pathname, const char* dirname){
         errno = ENOTCONN;
         return -1;
     }
-
     if(!pathname){
         errno = EINVAL;
         return -1;
     }
-
-    //Controllo se l'ultima operazione è stata una openFile con O_CREATE | O_LOCK su quel file
-    if(last_op != openFile_CREATE_LOCK_op && (strcmp(last_file_opened, pathname)) == 0) {
-        errno = ECANCELED;
+    if(strlen(pathname) > MAX_PATH || (dirname != NULL && strlen(dirname) > MAX_PATH)){
+        errno = ENAMETOOLONG;
         return -1;
     }
-    printf("pathname %s\n", pathname);
-    FILE* FileToWrite = fopen(pathname, "rb");
-    if(!FileToWrite){
-        errno = ENOENT;
+
+    //Verifico se il file è presente nel dispositivo del client
+    FILE* file = fopen(pathname, "rb");
+    if(!file){
+        perror("Write file - lato client");
         return -1;
     }
-    char name[MAX_FILENAME];
-    char pathname_to_Parse[MAX_FILENAME];
-    strcpy(pathname_to_Parse, pathname);
-    parseFilename(pathname_to_Parse, name);
-    //Ora "name" contiene il nome del file senza tutto il path
 
+    //Leggo il contenuto del file dal dispositivo del client
     struct stat sb;
-    if (stat(pathname, &sb) == -1){
-        return -1;
-    }
+    if (stat(pathname, &sb) == -1) return -1;
     off_t file_size =  sb.st_size;
     if(file_size == 0){
-        printf("Il file %s e' vuoto", pathname);
-        fclose(FileToWrite);
+        errno = ENODATA;
+        fclose(file);
         return -1;
     }
     void* data = NULL;
-    if(file_size != 0)
-       data = malloc(file_size);
+    data = malloc(file_size);
+    if(!data) return -1;
+    while (!feof(file)) fread(data, 1, file_size, file);
 
-    while ( (!feof(FileToWrite)) && (file_size != 0)){
-        fread(data, 1, file_size, FileToWrite);
-    }
-    //Invio l'operazione, il nome del file e il contenuto
-    sendToServer("WRITE_FILE", strlen("WRITE_FILE")+1, "string");
-    sendToServer((void*)name, strlen(name)+1, "string");
-    writen(socket_fd, &file_size, sizeof(size_t));
-    if(file_size != 0)
-        writen(socket_fd, data, file_size);
-    //Aspetto la risposta dal server
-    char* response = recieveFromServer("string");
-
-    //Prima di leggere la risposta controllo se ho un file espulso dalla openFile precedente
-    if(dirname){
-        //Controllo se la cartella esiste
-        DIR* dir = opendir(dirname); //TODO check dopo
-
-        if(expelled_file_content != NULL){
-            if(dir){
-                char newFilepath[MAX_ARGLEN];
-                strcpy(newFilepath, dirname);
-                strcat(newFilepath, "/");
-                strcat(newFilepath, expelled_file_name);
-                int name_len = strlen(expelled_file_name);
-                char t = expelled_file_name[name_len-3];
-                char x = expelled_file_name[name_len-2];
-                char t2 = expelled_file_name[name_len-1];
-                if(t == 't' && x == 'x' && t2 == 't'){
-                   expelled_file_content = (char*)expelled_file_content;
-                }
-                FILE* expelled = fopen(newFilepath, "wb");
-                if(expelled){
-                    if (fwrite(expelled_file_content, expelled_file_size, 1, expelled) != expelled_file_size){
-                        perror("Salvataggio del file espulso");
-                    }
-                }
-            }
-        }
-        closedir(dir);
-    }
-
-    //Se ho uno o più file espulsi devo scriverli nella cartella se c'è
-    while(strcmp(response, "EXPELLED") == 0){
-
-        //Leggo il nome del file espulso
-        char* filename = recieveFromServer("string");
-        //Leggo la dimensione del file espulso
-        size_t file_len = 0;
-        void *file_content = NULL;
-        readn(socket_fd, &file_len, sizeof(unsigned long));
-        //Alloco lo spazio per il file
-        if(file_len != 0) {
-           file_content = malloc(file_len);
-        }
-        printf("size file to alloc: %ld", file_len);
-        if(!file_content && file_len != 0){
-            free(response);
-            perror("Malloc");
-            return -1;
-        }
-        //Leggo il contenuto del file espulso
-        if(file_len != 0)
-            readn(socket_fd, file_content, file_len);
-
-        if(dirname){
-            char newFilepath[MAX_ARGLEN];
-            strcpy(newFilepath, dirname);
-            strcat(newFilepath, "/");
-            strcat(newFilepath, filename);
-            FILE* expelled = fopen(newFilepath, "wb");
-            if(expelled){
-                if (fwrite(file_content, file_size, 1, expelled) != file_size){
-                    perror("Salvataggio del file espulso");
-                }
-            }
-            free(file_content);
-        }
-
-        //Leggo il prossimo messaggio
-        response = recieveFromServer("string");
-    }
-
-    fclose(FileToWrite);
-    free(data);
-
-    if(strcmp(response, "OK") == 0){
-        free(response);
-        return 0;
-    }else{
-
-        free(response);
+    //Parsing nome del file
+    char pathname_to_parse[MAX_PATH];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
         return -1;
     }
-}
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    if(strcmp(lastOpenedFlags, pathname) != 0){
+        //Controllo se è l'ultimo file su cui ho eseguito la open con entrambi i flag
+        errno = EPERM;
+        return -1;
+    }
 
-int appendToFile(const char* pathname, void* buf, size_t size, const char* dirname){
+    int opcode = WRITE;
+    //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file, dimensione del file in bytes, contenuto
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
+    if (writen(socket_fd, &file_size, sizeof(off_t)) <= 0) return -1;
+    if (writen(socket_fd, data, file_size) <= 0) return -1;
+
+    //Aspetto responso per procedere
+    int response; int errno_copy;
+    if (readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+    if (readn(socket_fd, &errno_copy, sizeof(int)) <= 0) return -1;
+    if(response != 0){
+        free(data);
+        errno = errno_copy;
+        perror("Write file");
+        return -1;
+    }
+
+    //Aspetto eventuali file espulsi: leggo la dimensione del prossimo file espulso, quando ricevo 0 mi fermo
+    size_t storedFile_len = 0;
+    size_t storedFile_name_len = 0;
+    char storedFile_name[MAX_FILENAME];
+    void* storedFile_data = NULL;
+    DIR* dir = opendir(dirname);
+    do{
+        if (readn(socket_fd, &storedFile_len, sizeof(size_t)) <= 0) return -1;
+        if(storedFile_len == 0) break; //Quando ricevo 0 esco
+        storedFile_data = malloc(storedFile_len);
+
+        //Ricevo i restanti dati del file, nell'ordine: lunghezza nome file, nome file, contenuto
+        if (readn(socket_fd, &storedFile_name_len, sizeof(size_t)) <= 0) return -1;
+        if (readn(socket_fd, storedFile_name, storedFile_name_len) <= 0) return -1;
+        if (readn(socket_fd, data, storedFile_len) <= 0) return -1;
+
+        //Salvo il file nella cartella SOLO SE specificata e già esistente nel dispositivo
+        if(dirname != NULL && dir ) {
+            char complete_path[MAX_PATH + MAX_FILENAME];
+            strcpy(complete_path, dirname);
+            if (complete_path[strlen(complete_path)] != '/') strcat(complete_path, "/");
+            strcat(complete_path, storedFile_name);
+            //Creo e scrivo il file ricevuto
+            FILE* storedFile = fopen(complete_path, "wb");
+            if(!storedFile){
+                perror("Write file - salvataggio del file espulso");
+                return -1;
+            }
+            if (fwrite(storedFile_data, 1, storedFile_len, storedFile) != storedFile_len){
+                perror("Write file - scrittura contenuto file espulso");
+                return -1;
+            }
+            if(storedFile) fclose(storedFile);
+        }
+    }while(true);
+
+    if(storedFile_data) free(storedFile_data);
+    if(dir) closedir(dir);
+    if(storedFile_data) free(storedFile_data);
     return 0;
 }
 
 int lockFile(const char* pathname){
 
-    if(!connected){
+    if(connected == false) {
         errno = ENOTCONN;
         return -1;
     }
-
     if(!pathname){
         errno = EINVAL;
         return -1;
     }
-
-    printf("Lock file start\n");
-    sendToServer("LOCK_FILE", strlen("LOCK_FILE")+1,"string");
-    sendToServer((void*)pathname, strlen(pathname)+1, "string");
-
-    char* response = recieveFromServer("string");
-    if(response == NULL)
-        return -1;
-
-    if(strncmp(response, "OK", 2) == 0) {
-        last_op = lockFile_op;
-        add_head_element(locked_files, (char*)pathname);
-        free(response);
-        return 0;
-    }else if(strcmp(response, "ALREADY LOCKED") == 0){
-        last_op = lockFile_op;
-        free(response);
-        return 0;
-    }else if(strcmp(response, "ERROR") == 0){
-        free(response);
+    if(strlen(pathname) > MAX_PATH){
+        errno = ENAMETOOLONG;
         return -1;
     }
 
-    //TODO send request to server and if ok modify API list
+    //Parsing nome del file
+    char pathname_to_parse[MAX_ARGLEN];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    int opcode = LOCK;
+    int errno_copy;
+    int response = -1;
 
-    return -1;
+    do{
+        //try++;
+        //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file
+        if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+        if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+        if (writen(socket_fd, filename, filename_len) <= 0) return -1;
+
+        //Aspetto risposta
+        if (readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+        if (readn(socket_fd, &errno_copy, sizeof(int)) <= 0) return -1;
+
+        //Se è andato a buon fine ok
+        if (response == 0)
+            return response;
+
+    }while(errno_copy == EACCES);
+    errno = errno_copy;
+
+    if(response != 0)
+        perror("lockFile");
+    return response;
 }
 
-int unlockFile(const char* pathname){
-
-    if(!connected){
+int unlockFile(const char* pathname) {
+    if(connected == false) {
         errno = ENOTCONN;
         return -1;
     }
-
     if(!pathname){
         errno = EINVAL;
         return -1;
     }
-
-    printf("unlock file start\n");
-    sendToServer("UNLOCK_FILE", strlen("UNLOCK_FILE")+1,"string");
-    sendToServer((void*)pathname, strlen(pathname)+1, "string");
-
-    char* response = recieveFromServer("string");
-    if(response == NULL)
-        return -1;
-
-    if(strncmp(response, "OK", 2) == 0) {
-        last_op = unlockFile_op;
-        free(response);
-        elem_t * toDestroy = get_elem(locked_files, (char*)pathname, (int (*)(void *, void *)) strcmp);
-        free(toDestroy);
-        return 0;
-    }else if(strncmp(response, "ALREADY UNLOCKED", 16) == 0){
-        last_op = unlockFile_op;
-        free(response);
-        elem_t * toDestroy = get_elem(locked_files, (char*)pathname, (int (*)(void *, void *)) strcmp);
-        free(toDestroy);
-        return 1;
-    }//Se ho ricevuto dei file espulsi
-    else {
-        free(response); //TODO errno
+    if(strlen(pathname) > MAX_PATH){
+        errno = ENAMETOOLONG;
         return -1;
     }
 
-}
-
-int sendToServer(void* content, size_t len, const char* contentType){
-
-    if (writen(socket_fd, &len, sizeof(int)) < 0) {
+    //Parsing nome del file
+    char pathname_to_parse[MAX_ARGLEN];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
         return -1;
     }
-    if ( (writen(socket_fd, content, len) ) < 0 ){
+    if(filename_len <= 0){
+        errno = EINVAL;
         return -1;
     }
+    int opcode = UNLOCK;
+    int errno_copy;
+    int response = -1;
 
-    return 0;
-}
+    //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
 
-void* recieveFromServer(const char* contentType){
+    //Aspetto risposta
+    if (readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+    if (readn(socket_fd, &errno_copy, sizeof(int)) <= 0) return -1;
+    errno = errno_copy;
 
-    size_t len = 0;
-
-    //Ricevo lunghezza
-    if ( readn(socket_fd, &len, sizeof(int)) <= 0){
-        return NULL;
-    }
-    if( strcmp(contentType, "string") == 0) {
-        void *response = malloc(sizeof(char) * len+1);
-        if(response == NULL)
-            return NULL;
-
-        if ( readn(socket_fd, response, len+1) <= 0){
-            return NULL;
-        }
-
+    //Se è andato a buon fine ok
+    if (response == 0) {
+        if (strcmp(lastOpenedFlags, filename) == 0) strcpy(lastOpenedFlags, "");
         return response;
     }
 
-    else if( strcmp(contentType, "file") == 0){
-        void *file_content = malloc(len);
-        if(file_content == NULL)
-            return NULL;
+    if(response != 0)
+        perror("unlockFile");
 
-        if ( readn(socket_fd, file_content, len) <= 0){
-            return NULL;
-        }
+    return response;
+}
 
-        return file_content;
+int removeFile(const char* pathname){
+
+    if(connected == false) {
+        errno = ENOTCONN;
+        return -1;
+    }
+    if(!pathname){
+        errno = EINVAL;
+        return -1;
+    }
+    if(strlen(pathname) > MAX_PATH){
+        errno = ENAMETOOLONG;
+        return -1;
     }
 
-    return NULL;
+    //Parsing nome del file
+    char pathname_to_parse[MAX_ARGLEN];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    int opcode = REMOVE;
+    int errno_copy;
+    int response = -1;
+
+    //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
+
+    //Aspetto risposta
+    if (readn(socket_fd, &response, sizeof(int)) <= 0) return -1;
+    if (readn(socket_fd, &errno_copy, sizeof(int)) <= 0) return -1;
+    errno = errno_copy;
+
+    //Se è andato a buon fine ok
+    if (response == 0) {
+        if(strcmp(lastOpenedFlags, pathname) == 0) strcpy(lastOpenedFlags, "");
+        return response;
+    }
+
+    if(response != 0)
+        perror("Remove file");
+
+    return response;
+
 }
 
 
-void reset(){
 
-    connected = false;
-    socket_fd = -1;
-    strncpy(last_file_opened, "", MAX_FILENAME-1);
-    strcpy(expelled_file_name, "");
-    expelled_file_size = 0;
-    strncpy(mySockname, "", MAX_SOCKNAME-1);
-    last_op = closeConnection_op;
-    if(expelled_file_content != NULL) {
-        free(expelled_file_content);
-        expelled_file_content = NULL;
-    }
-    if(locked_files != NULL) {
-        list_destroy(locked_files, NULL);
-        locked_files = NULL;
-    }
 
-}
 

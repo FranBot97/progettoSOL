@@ -1,17 +1,22 @@
 //
 // Created by linuxlite on 21/02/22.
 //
-#include "../includes/list.h"
+#include <list.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
-
+/**
+ * Crea una lista di tipo list_t allocando lo spazio necessario.
+ * Controlla che l'allocazione sia andata a buon fine.
+ *
+ * @return puntatore alla lista creata o NULL in caso di errore. Sets errno
+ */
 list_t* list_create() {
 
-    list_t *return_list = (list_t *) malloc(sizeof(list_t));
+    list_t *return_list = (list_t *)malloc(sizeof(list_t));
     if(!return_list) {
-        perror("Malloc");
-        return NULL;
+       return NULL;
     }
     return_list->HEAD = NULL;
     return_list->TAIL = NULL;
@@ -20,14 +25,38 @@ list_t* list_create() {
     return return_list;
 }
 
-int add_tail_element(list_t* list, void* content){
+void list_printAsString(list_t* list){
+
+    if (!list || !list->HEAD)
+        return;
+
+    elem_t *elem = list->HEAD;
+    while (elem != NULL) {
+        printf("%s\n", (char*)elem->content);
+        elem = elem->next;
+    }
+
+}
+
+
+/**
+ *  Aggiunge in coda alla lista puntata dal parametro list
+ *  un elemento con contenuto puntato dal parametro content
+ *  Controlla che l'allocazione del nuovo elemento sia andata a buon fine.
+ *
+ * @param list - puntatore alla lista a cui aggiungere l'elemento
+ * @param content - puntatore al contenuto generico del nuovo elemento
+ * @return il puntatore all'oggetto appena inserito, NULL in caso di errore, Sets errno
+ */
+elem_t* list_append(list_t* list, void* content){
 
     if(!list || !content)
-        return -1;
+        return NULL;
 
-    elem_t* new_elem;
-    if( (new_elem = (elem_t*)malloc(sizeof(elem_t))) == NULL)
-        return -1;
+    elem_t* new_elem = NULL;
+    if( (new_elem = (elem_t*)malloc(sizeof(elem_t))) == NULL){
+        return NULL;
+    }
     new_elem->content = content;
     new_elem->previous = NULL;
     new_elem->next = NULL;
@@ -37,25 +66,36 @@ int add_tail_element(list_t* list, void* content){
         list->HEAD = new_elem;
         list->TAIL = new_elem;
         list->num_elem++;
-        return 0;
+    }else{
+        new_elem->previous = list->TAIL;
+        list->TAIL->next = new_elem;
+        list->TAIL = new_elem;
+        list->num_elem++;
     }
-    new_elem->previous = list->TAIL;
-    list->TAIL->next = new_elem;
-    list->TAIL = new_elem;
-    list->num_elem++;
-
-    return 0;
-
+    return new_elem;
 }
 
-int add_head_element(list_t* list, void* content){
+
+
+
+/**
+ *  Aggiunge in testa alla lista puntata dal parametro list
+ *  un elemento con contenuto puntato dal parametro content
+ *  Controlla che l'allocazione del nuovo elemento sia andata a buon fine.
+ *
+ * @param list - puntatore alla lista a cui aggiungere l'elemento
+ * @param content - puntatore al contenuto generico del nuovo elemento
+ * @return il puntatore all'oggetto appena inserito, NULL in caso di errore, Sets errno
+ */
+elem_t* list_prepend(list_t* list, void* content){
 
     if(!list || !content)
-        return -1;
+        return NULL;
 
-    elem_t* new_elem;
-    if( (new_elem = (elem_t*)malloc(sizeof(elem_t))) == NULL)
-        return -1;
+    elem_t* new_elem = NULL;
+    if( (new_elem = (elem_t*)malloc(sizeof(elem_t))) == NULL){
+        return NULL;
+    }
     new_elem->content = content;
     new_elem->next = NULL;
     new_elem->previous = NULL;
@@ -65,130 +105,214 @@ int add_head_element(list_t* list, void* content){
         list->HEAD = new_elem;
         list->TAIL = new_elem;
         list->num_elem++;
-        return 0;
+    }else{
+        new_elem->next = list->HEAD;
+        list->HEAD->previous = new_elem;
+        list->HEAD = new_elem;
+        list->num_elem++;
     }
-
-    new_elem->next = list->HEAD;
-    list->HEAD = new_elem;
-    list->num_elem++;
-
-    return 0;
-
+    return new_elem;
 }
 
-elem_t* get_head(list_t* list){
+
+
+
+/**
+ * Restituisce il puntatore al primo nodo della lista, senza rimuoverlo
+ *
+ * @param list - lista da cui prelevare il nodo di testa
+ * @return il puntatore al primo nodo della lista, NULL in caso errore
+ */
+elem_t* list_get_head(list_t* list){
 
     if(!list || list->num_elem == 0)
         return NULL;
 
-    elem_t* head_elem = list->HEAD;
-    list->HEAD = list->HEAD->next;
-    list->num_elem--;
-
-    return head_elem;
+    return list->HEAD;
 }
 
-elem_t* get_tail(list_t* list){
-/*TODO Non posso farlo se non è una doube linked list, cioè si posso farlo ma in O(n)*/
+
+
+
+/**
+ * Rimuove il primo nodo dalla lista senza deallocarlo.
+ *
+ * @param list - puntatore alla lista da cui rimuovere il primo nodo
+ * @return puntatore al nodo appena rimosso
+ */
+elem_t* list_remove_head(list_t* list){
+
     if(!list || list->num_elem == 0 || (list->HEAD) == NULL)
         return NULL;
 
-    if(list->TAIL){
-        if(list->num_elem == 1){
-            elem_t* return_elem = list->TAIL;
-            list->num_elem = 0;
-            list->HEAD = NULL;
-            list->TAIL = NULL;
-            return return_elem;
-        }
-        else{
-            elem_t* return_elem = list->TAIL;
-            list->TAIL = list->TAIL->previous;
-            list->num_elem--;
-            return return_elem;
-        }
-
-
-    }
-    return NULL;
-    /*elem_t* elem = list->HEAD;
-    elem_t* last_elem = NULL;
-    elem_t* penultimate_elem = NULL;
-    while(elem != NULL){
-        penultimate_elem = last_elem;
-        last_elem = elem;
-        elem = elem->next;
-    }
-    if(penultimate_elem)
-        penultimate_elem->next = NULL;
-    list->TAIL = penultimate_elem;
+    elem_t* return_elem = list->HEAD;
+    list->HEAD = list->HEAD->next;
+    if(list->HEAD) list->HEAD->previous = NULL;
     list->num_elem--;
 
-    if(last_elem)
-        return last_elem;
-    else
-        return NULL;
-        */
+    if(list->num_elem == 0){
+        list->TAIL = list->HEAD;
+        if(list->HEAD) list->HEAD->next = NULL;
+    }
+
+    return return_elem;
 }
 
-elem_t* get_elem(list_t* list, void* value, int (*compare_function)(void*, void*)){
 
-    if(!list || !compare_function || !list->HEAD)
+
+
+
+/**
+ * Restituisce il puntatore all'ultimo nodo della lista, senza rimuoverlo
+ *
+ * @param list - lista da cui prelevare il nodo di coda
+ * @return il puntatore all'ultimo nodo della lista, NULL in caso errore
+ */
+elem_t* list_get_tail(list_t* list){
+
+    if(!list || list->num_elem == 0)
         return NULL;
 
-    elem_t* elem = list->HEAD;
-    elem_t* before_elem = elem;
-    while(elem != NULL){
-        if( compare_function(elem->content, value) == 0 ){
-            printf("DEBUG, TROVATO!\n");
-            //Se c'è solo un elemento
-            if(list->num_elem == 1){
-                list->HEAD = NULL;
-                list->TAIL = NULL;
-                list->num_elem = 0;
-                return elem;
-            }
-            //Se c'è più di un elemento ed è il primo
-            if(elem == list->HEAD){
-                //Il nuovo HEAD ora è il secondo
-                list->HEAD = elem->next;
-                //Il precedente di HEAD è NULL
-                list->HEAD->previous = NULL;
-                list->num_elem--;
-                return elem;
-            }
+    return list->TAIL;
 
-            //Se c'è più di un elemento ed è l'ultimo
-            if(elem == list->TAIL){
-                //il nuovo TAIL ora è il penultimo
-                list->TAIL = elem->previous;
-                //Il successivo di TAIL è NULL
-                list->TAIL->next = NULL;
-                list->num_elem--;
-                return elem;
-            }
+}
 
-            //Se è un elemento centrale
-            before_elem->next = elem->next;
-            elem->next->previous = before_elem;
-            list->num_elem--;
+
+
+
+
+/**
+ * Rimuove l'ultimo nodo dalla lista senza deallocarlo.
+ *
+ * @param list - puntatore alla lista da cui rimuovere l'ultimo nodo
+ * @return puntatore al nodo appena rimosso
+ */
+elem_t* list_remove_tail(list_t* list){
+
+    if(!list || list->num_elem == 0)
+        return NULL;
+
+    elem_t* return_elem = list->TAIL;
+    list->TAIL = list->TAIL->previous;
+    if(list->TAIL) list->TAIL->next = NULL;
+    list->num_elem--;
+
+    if(list->num_elem == 0){
+        list->HEAD = list->TAIL;
+        if(list->TAIL) list->TAIL->previous = NULL;
+    }
+
+    return return_elem;
+}
+
+
+
+
+/**
+ * Confronta il contenuto dei nodi della lista con il valore passato come parametro,
+ * se trova una corrispondenza restituisce un puntatore all'elemento senza rimuoverlo dalla lista.
+ *
+ * @param list - puntatore alla lista
+ * @param value - valore da confrontare con il contenuto dei nodi della lista
+ * @param compare_function - funzione utilizzata per confrontare i nodi,
+ * deve restituire 0 in caso di successo. Può essere sostituita con NULL per utilizzare l'uguaglianza
+ * semplice (n == m)
+ *
+ * @return puntatore all'elemento trovato, NULL altrimenti
+ */
+elem_t* list_get_elem(list_t* list, void* value, int (*compare_function)(void*, void*)) {
+
+    if (!list || !list->HEAD)
+        return NULL;
+
+    elem_t *elem = list->HEAD;
+    while (elem != NULL) {
+        //Se la compare_function è diversa da NULL uso quella, altrimenti uso uguaglianza semplice
+        if (((compare_function != NULL) && (compare_function(elem->content, value) == 0)) ||
+            ((compare_function == NULL) && (elem->content == value))) {
+            //elemento trovato
             return elem;
-
         }
-        before_elem = elem;
         elem = elem->next;
     }
-    //Se non l'ho trovato
-     return NULL;
+    return NULL;
 }
 
+
+/**
+ * Confronta il contenuto dei nodi della lista con il valore passato come parametro,
+ * se trova una corrispondenza restituisce un puntatore all'elemento rimuovendolo dalla lista,
+ * ma senza deallocarlo.
+ *
+ * @param list - puntatore alla lista
+ * @param value - valore da confrontare con il contenuto dei nodi della lista
+ * @param compare_function - funzione utilizzata per confrontare i nodi,
+ * deve restituire 0 in caso di successo. Può essere sostituita con NULL per utilizzare l'uguaglianza
+ * semplice (n == m)
+ *
+ * @return puntatore all'elemento trovato, NULL altrimenti
+ */
+elem_t* list_remove_elem(list_t* list, void* value, int (*compare_function)(void*, void*)) {
+
+    if (!list || !list->HEAD)
+        return NULL;
+
+    elem_t* return_elem = NULL;
+    elem_t *elem = list->HEAD;
+    while (elem != NULL) {
+        //Se la compare_function è diversa da NULL uso quella, altrimenti uso una normale uguaglianza
+        if (((compare_function != NULL) && (compare_function(elem->content, value) == 0)) ||
+            ((compare_function == NULL) && (elem->content == value))) {
+            //elemento trovato
+            return_elem = elem;
+            //Se è l'elemento di testa
+            if (elem == list->HEAD) {
+                list->HEAD = elem->next;
+                if (list->HEAD)
+                    list->HEAD->previous = NULL;
+                list->num_elem--;
+            }
+                //Se è l'elemento di coda
+            else if (elem == list->TAIL) {
+                list->TAIL = elem->previous;
+                if (list->TAIL)
+                    list->TAIL->next = NULL;
+                list->num_elem--;
+            }
+                //E' un elemento centrale
+            else {
+                elem->previous->next = elem->next;
+                elem->next->previous = elem->previous;
+                list->num_elem--;
+            }
+
+            //Se non ci sono più elementi sistemo la coda
+            if (list->num_elem == 0) {
+                list->HEAD = NULL;
+                list->TAIL = NULL;
+            }
+            return return_elem;
+        }
+    }
+    return NULL;
+}
+
+
+
+/**
+ * Funzione che dealloca la lista e ogni suo nodo.
+ *
+ * @param list -  puntatore alla lista da deallocare
+ * @param free_content - puntatore alla funzione che dealloca il contenuto dei nodi,
+ * può essere NULL se il contenuto non deve essere deallocato.
+ */
 void list_destroy(list_t* list, void (*free_content)(void*)){
 
     if(list == NULL)
         return;
 
     while(list->num_elem != 0){
-       elem_t* toDestroy = get_head(list);
+       elem_t* toDestroy = list_remove_head(list);
        if(free_content && toDestroy->content)
            (free_content)(toDestroy->content);
        free(toDestroy);

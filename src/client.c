@@ -1,9 +1,3 @@
-//
-// Created by francesco on 19/11/21.
-//
-//TODO scegliere come fare per mandare messaggi/contenuti file
-
-/***** INIZIO TEST ****/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -11,10 +5,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <API.h>
-#include <constant_values.h>
 #include <time.h>
 #include <sys/stat.h>
-
 
 char sockname[MAX_SOCKNAME];
 
@@ -24,75 +16,14 @@ enum flags_   {
 };
 
 //Stampa comandi disponibili
-static void print_help(){
+static void print_help();
 
-    printf("Comandi disponibili:\n\
-    -f filename: specifica il nome del socket AF_UNIX a cui connettersi \n\
-    -w dirname[,n=0]: invia al server al massimo 'n' file presenti nella cartella ‘dirname’, se n=0 vengono inviati tutti, se possibile \n\
-    -W file1[,file2]: lista di nomi di file da scrivere nel server separati da ‘,’ \n\
-    -D dirname: cartella dove ricevere i file che il server rimuove a seguito di capacity misses, da usare dopo -w o -W \n\
-    -r file1[,file2]: lista di nomi di file da leggere dal server separati da ‘,’\n\
-    -R [n=0]: legge ‘n’ file qualsiasi attualmente memorizzati nel server, se n=0 o non specificato allora vengono letti tutti i file presenti nel server\n\
-    -d dirname: cartella dove scrivere i file letti dal server da usare dopo ‘-r’ o ‘-R’\n\
-    -t time: tempo in millisecondi che intercorre tra l’invio di due richieste successive \n\
-    -l file1[,file2]: lista di nomi di file su cui acquisire la mutua esclusione\n\
-    -u file1[,file2]: lista di nomi di file su cui rilasciare la mutua esclusione\n\
-    -c file1[,file2]: lista di file da rimuovere dal server se presenti \n\
-    -p: abilita le stampe sullo standard output per ogni operazione\n   ");
+void intHandler();
 
-}
+int checkArgument(const char* arg);
 
+int readFileContent(char* pathname);
 
-void intHandler() {
-    fflush(stdout);
-    if ( closeConnection(sockname) != 0){
-        printf("Cannot close connection\n");
-        perror("Close connection");
-    }
-    printf("\n Disconnesso, bye!\n");
-    fflush(stdout);
-    exit(1);
-}
-
-int checkArgument(const char* arg) {
-
-    if ( !optarg || arg[0] == '-'
-        || (strcmp(optarg, "-h") == 0) || (strcmp(optarg, "-f") == 0)
-        || (strcmp(optarg, "-w") == 0) || (strcmp(optarg, "-W") == 0)
-        || (strcmp(optarg, "-D") == 0) || (strcmp(optarg, "-r") == 0)
-        || (strcmp(optarg, "-R") == 0) || (strcmp(optarg, "-d") == 0)
-        || (strcmp(optarg, "-t") == 0) || (strcmp(optarg, "-l") == 0)
-        || (strcmp(optarg, "-u") == 0) || (strcmp(optarg, "-c") == 0)
-        || (strcmp(optarg, "-p") == 0)
-            ) {
-        return -1;
-    }else
-        return 0;
-}
-
-int readFileContent(char* pathname){
-
-    FILE* file;
-    file = fopen(pathname, "rb+");
-    if(!file){
-        perror("Open file");
-        return -1;
-    }
-    struct stat sb;
-    if (stat(pathname, &sb) == -1){
-        printf("ERRORE");
-    }
-
-    size_t file_size = sb.st_size;
-    void* data = malloc(file_size);
-    while (fread(data, 1, file_size, file) > 0){
-
-    }
- //  ((char*)(data))[file_size] = '\0';
-    printf("%s", (char*)data);
-    fclose(file);
-    return 0;
-}
 
 int main(int argc, char* argv[]) {
 
@@ -138,7 +69,7 @@ int main(int argc, char* argv[]) {
             case 'f':
                 if (!f_opt) {//evita connessioni multiple
 
-                    if(checkArgument(optarg) == -1){
+                    if (checkArgument(optarg) == -1) {
                         optind--;
                         get_opt = false;
                         printf("Option -f requires an argument\n");
@@ -154,8 +85,8 @@ int main(int argc, char* argv[]) {
                     strncpy(sockname, optarg, MAX_SOCKNAME - 1);
 
                     //Eventuale attesa
-                    if(msec > 0)
-                        sleep(msec/1000);
+                    if (msec > 0)
+                        sleep(msec / 1000);
 
                     if (openConnection(sockname, RETRY_CONN_MSEC, timeLimit) == 0) {
                         f_opt = true;
@@ -214,7 +145,7 @@ int main(int argc, char* argv[]) {
             }
             case 'W': {
                 char argument[MAX_ARGLEN];
-                char* directory = NULL;
+                char *directory = NULL;
                 if (checkArgument(optarg) == -1) {
                     optind--;
                     get_opt = false;
@@ -238,8 +169,8 @@ int main(int argc, char* argv[]) {
                             }
                             get_opt = false;
                             //todo opero con la cartella
-                            directory = malloc(sizeof(char)*strlen(optarg)+1);
-                            if(!directory){
+                            directory = malloc(sizeof(char) * strlen(optarg) + 1);
+                            if (!directory) {
                                 perror("Malloc");
                                 exit(EXIT_FAILURE);
                             }
@@ -259,23 +190,25 @@ int main(int argc, char* argv[]) {
                 }
 
                 //invia file specificati senza opzione -D
-                char* filepath;
-                char* rest = NULL;
+                char *filepath;
+                char *rest = NULL;
                 filepath = strtok_r(argument, ",", &rest);
 
-                while(filepath != NULL) {
-                    struct stat st;
-                    stat(filepath, &st);
-                    off_t len = st.st_size;
-                    printf("%ld", len);
-                    openFile(filepath, O_CREATE | O_LOCK);
-                    if (writeFile(filepath, directory) != 0)
-                        perror("Writing file");
-                    //closeFile(filename);
+                while (filepath != NULL) {
+                    if (openFile(filepath, O_CREATE | O_LOCK) == 0)
+                        printf("File aperto\n");
+                    /*if (writeFile(filepath, directory) != 0) {
+                        printf("Impossibile scrivere il file\n");
+                    } else {
+                        printf("FIle scritto\n");
+                    }*/
+                    /*if (closeFile(filepath) == 0)
+                        printf("File chiuso\n");*/
+
                     filepath = strtok_r(NULL, ",", &rest);
                 }
                 printf("Termine\n");
-                if(directory)
+                if (directory)
                     free(directory);
 
                 break;
@@ -286,20 +219,23 @@ int main(int argc, char* argv[]) {
                 break;
 
             case 'r':
-                if(checkArgument(optarg) == -1){
+            {
+                if (checkArgument(optarg) == -1) {
                     optind--;
                     get_opt = false;
                     printf("Option -r requires an argument\n");
                     break;
                 }
-                 //TODO
+                char pathname[MAX_ARGLEN];
+                strcpy(pathname, optarg);
+                //TODO
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
 
                 } else {
                     switch (opt) {
                         case 'd':
-                            if(!f_opt){
+                            if (!f_opt) {
                                 printf("Connessione al server assente, impossibile completare la richiesta\n");
                                 get_opt = false;
                                 break;
@@ -316,8 +252,41 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 //Legge file specificati
-                break;
 
+                if (openFile(pathname, O_LOCK | O_CREATE) == 0){
+                    printf("File aperto correttamente\n");
+                }else{
+                    printf("File non aperto\n");
+                }
+                if(writeFile(pathname, NULL) == 0){
+                    printf("File letto");
+                }
+                if (removeFile(pathname) == 0) printf("File rimosso\n");
+               /* if (openFile(pathname, 0) == 0){
+                    printf("File aperto correttamente\n");
+                }else{
+                    printf("File non aperto\n");
+                }*/
+                //sleep(5);
+                //if (lockFile(pathname) == 0) printf("File locked");
+                fflush(stdout);
+                //sleep(5);
+                //if (unlockFile(pathname) == 0) printf("File unlocked");
+
+
+                //void *buf;
+                //size_t size;
+                /*if (readFile(pathname, &buf, &size) == 0){
+                    printf("File letto correttamente\n");
+                    FILE *f = fopen("/home/linuxlite/Scrivania/ricevi/fileRicevuto.txt", "wb");
+                    if (fwrite(buf, size, 1, f) != 1) {
+                    }
+                }else{
+                    printf("File non letto\n");
+                }*/
+
+                break;
+        }
             case 'R': {
 
                 if (R_has_args) {
@@ -378,6 +347,7 @@ int main(int argc, char* argv[]) {
                        // printf("%c\n", opt);
                         if (opt == -1) { //TODO ------- caso -R n ]
                             //TODO leggo N files dal server senza cartella
+                            /*readNFiles(2, "/home/linuxlite/Scrivania/ricevi");*/
                             if (!f_opt) {
                                 printf("Connessione al server assente, impossibile completare la richiesta\n");
                                 get_opt = false;
@@ -389,6 +359,7 @@ int main(int argc, char* argv[]) {
 
                             if(opt != 'd'){
                                 //TODO leggo N files dal server senza cartella
+                               // readNFiles(2, "/home/linuxlite/Scrivania/ricevi");
                                 if (!f_opt) {
                                     printf("Connessione al server assente, impossibile completare la richiesta\n");
                                     get_opt = false;
@@ -458,19 +429,20 @@ int main(int argc, char* argv[]) {
                 }
                 // strtok di optarg su "," e poi
                 //lock sui file specificati
-                char* filename = NULL;
-                filename = strtok(optarg, ",");
-                while (filename  != NULL){
-                   // printf("il file è %s\n", filename);
-                    //Eventuale attesa
+                //invia file specificati senza opzione -D
+                char *filepath;
+                char *rest = NULL;
+                filepath = strtok_r(optarg, ",", &rest);
+
+                while (filepath != NULL) {
                     if(msec > 0)
                         sleep(msec/1000);
-                    if (lockFile(filename) == 0){
-                        if(printInfo) printf("OPERAZIONE:  Lock file \nFILE: %s \nESITO: Priorità acquisita correttamente\n", filename);
+                    /*if (lockFile(filepath) == 0){
+                        if(printInfo) printf("OPERAZIONE:  Lock file \nFILE: %s \nESITO: Priorità acquisita correttamente\n", filepath);
                     }else{
-                        if(printInfo) printf("OPERAZIONE: Lock file \nFILE: %s \nESITO: Impossibile acquisire la priorità sul file\n", filename);
-                    }
-                    filename = strtok(NULL, ",");
+                        if(printInfo) printf("OPERAZIONE: Lock file \nFILE: %s \nESITO: Impossibile acquisire la priorità sul file\n", filepath);
+                    }*/
+                    filepath = strtok_r(NULL, ",", &rest);
                 }
                 break;
 
@@ -485,29 +457,28 @@ int main(int argc, char* argv[]) {
                     printf("Connessione al server assente, impossibile completare la richiesta\n");
                     break;
                 }
-                // strtok di optarg su "," e poi
-                //unlock sui file specificati
-                filename = NULL;
-                filename = strtok(optarg, ",");
-                while (filename  != NULL){
-                    // printf("il file è %s\n", filename);
-                    //Eventuale attesa
+
+                filepath = NULL;
+                rest = NULL;
+                filepath = strtok_r(optarg, ",", &rest);
+
+                while (filepath != NULL) {
                     if(msec > 0)
                         sleep(msec/1000);
-                    if (unlockFile(filename) == 0){
+                   /* if (unlockFile(filepath) == 0){
                         if(printInfo){
                             printf("---------------------------------\n"
                                    "OPERAZIONE:  Unlock file \nFILE: %s \nESITO: Priorità rilasciata correttamente\n"
                                    "---------------------------------\n",
-                                   filename);
+                                   filepath);
                         }
                     }else{
                         if(printInfo) printf("=====================================\n"
                                              "OPERAZIONE: Unlock file \nFILE: %s \nESITO: Impossibile rilasciare la priorità sul file\n"
                                              "=====================================\n",
-                                             filename);
-                    }
-                    filename = strtok(NULL, ",");
+                                             filepath);
+                    }*/
+                    filepath = strtok_r(NULL, ",", &rest);
                 }
                 break;
 
@@ -524,7 +495,23 @@ int main(int argc, char* argv[]) {
                 }
                 //cancella i file specificati dal server
                 // strtok di optarg su "," e poi remove di ognuno
-                remove(optarg);
+                filepath = NULL;
+               rest = NULL;
+                filepath = strtok_r(optarg, ",", &rest);
+
+                while(filepath != NULL) {
+                    if(openFile(filepath, 0) == 0)
+                        printf("File aperto\n");
+                   /* if (removeFile(filepath) != 0){
+                        printf("Impossibile eliminare il file\n");
+                    }else{
+                        printf("File eliminato\n");
+                    }*/
+                    /*if (closeFile(filepath) == 0)
+                        printf("File chiuso\n");*/
+
+                    filepath = strtok_r(NULL, ",", &rest);
+                }
                 break;
 
             case 'p':
@@ -535,7 +522,7 @@ int main(int argc, char* argv[]) {
                 break;
 
             case 'q':
-                sendToServer("quit", strlen("quit")+1, "string");
+             //   quit();
                 break;
 
             case '?':
@@ -554,10 +541,85 @@ int main(int argc, char* argv[]) {
                        printf("Option %c requires an argument\n", optopt);
                    }
             }
+
+            default:
+                printf("Comando sconosciuto -%c\n", optopt);
+                break;
         }
         /***************/
     }
     closeConnection(sockname);
 }
-/***** FINE TEST ****/
 
+
+/***************** FUNZIONI AGGIUNTIVE ******************/
+
+static void print_help(){
+
+    printf("Comandi disponibili:\n\
+    -f filename: specifica il nome del socket AF_UNIX a cui connettersi \n\
+    -w dirname[,n=0]: invia al server al massimo 'n' file presenti nella cartella ‘dirname’, se n=0 vengono inviati tutti, se possibile \n\
+    -W file1[,file2]: lista di nomi di file da scrivere nel server separati da ‘,’ \n\
+    -D dirname: cartella dove ricevere i file che il server rimuove a seguito di capacity misses, da usare dopo -w o -W \n\
+    -r file1[,file2]: lista di nomi di file da leggere dal server separati da ‘,’\n\
+    -R [n=0]: legge ‘n’ file qualsiasi attualmente memorizzati nel server, se n=0 o non specificato allora vengono letti tutti i file presenti nel server\n\
+    -d dirname: cartella dove scrivere i file letti dal server da usare dopo ‘-r’ o ‘-R’\n\
+    -t time: tempo in millisecondi che intercorre tra l’invio di due richieste successive \n\
+    -l file1[,file2]: lista di nomi di file su cui acquisire la mutua esclusione\n\
+    -u file1[,file2]: lista di nomi di file su cui rilasciare la mutua esclusione\n\
+    -c file1[,file2]: lista di file da rimuovere dal server se presenti \n\
+    -p: abilita le stampe sullo standard output per ogni operazione\n   ");
+
+}
+
+
+void intHandler() {
+    fflush(stdout);
+    if ( closeConnection(sockname) != 0){
+        printf("Cannot close connection\n");
+        perror("Close connection");
+    }
+    printf("\n Disconnesso, bye!\n");
+    fflush(stdout);
+    exit(1);
+}
+
+int checkArgument(const char* arg) {
+
+    if ( !optarg || arg[0] == '-'
+         || (strcmp(optarg, "-h") == 0) || (strcmp(optarg, "-f") == 0)
+         || (strcmp(optarg, "-w") == 0) || (strcmp(optarg, "-W") == 0)
+         || (strcmp(optarg, "-D") == 0) || (strcmp(optarg, "-r") == 0)
+         || (strcmp(optarg, "-R") == 0) || (strcmp(optarg, "-d") == 0)
+         || (strcmp(optarg, "-t") == 0) || (strcmp(optarg, "-l") == 0)
+         || (strcmp(optarg, "-u") == 0) || (strcmp(optarg, "-c") == 0)
+         || (strcmp(optarg, "-p") == 0)
+            ) {
+        return -1;
+    }else
+        return 0;
+}
+
+int readFileContent(char* pathname){
+
+    FILE* file;
+    file = fopen(pathname, "rb+");
+    if(!file){
+        perror("Open file");
+        return -1;
+    }
+    struct stat sb;
+    if (stat(pathname, &sb) == -1){
+        printf("ERRORE");
+    }
+
+    size_t file_size = sb.st_size;
+    void* data = malloc(file_size);
+    while (fread(data, 1, file_size, file) > 0){
+
+    }
+    //  ((char*)(data))[file_size] = '\0';
+    printf("%s", (char*)data);
+    fclose(file);
+    return 0;
+}

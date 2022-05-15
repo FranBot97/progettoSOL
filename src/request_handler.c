@@ -10,411 +10,329 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <request.h>
+#include <stdbool.h>
 
-//TODO ero rimasto a fare i flag per Open File O_LOCK O_CREATE quando usarli ecc..
-
+//TODO sistemare con una unica write OK write ERROR
 void request_handler_function(request_t* request) {
 
     if (!request)
         return;
 
     //Se la richiesta è valida qui la gestisco
-    else {
-     //   storage_t* myStorage = request->myStorage;
-        printf("Il messaggio ricevuto è %s\n", request->command);
-        fflush(stdout);
+    printf("Richiesta %d da parte del client %ld \n", request->opcode, request->client_fd);
+    fflush(stdout);
 
-        /*******OPERAZIONI STORAGE, QUI CI VANNO LE FUNZIONI IN BASE ALLA RICHIESTA*****/
+    int result = -1;
+    /***** Identifico la richiesta e effettuo le operazioni corrispondenti ******/
+    switch(request->opcode){
+        case OPEN:
+            result = server_openFile(request);
+            break;
+        case WRITE:
+            result = server_writeFile(request);
+            goto check_fatal;
+            break;
+        case READ:
+            break;
+        case READN:
+            break;
+        case LOCK:
+            result = server_lockFile(request);
+            break;
+        case CLOSE:
+            result = server_closeFile(request);
+            break;
+        case UNLOCK:
+            result = server_unlockFile(request);
+            break;
+        case REMOVE:
+            result = server_removeFile(request);
+            break;
+        default: //invalid request
+            errno = EBADRQC;
+            break;
+    }
 
-      if(strncmp(request->command, "OPEN_FILE",strlen("OPEN_FILE") ) == 0){
-          char* filename = NULL;
-          if(readClient((void*)&filename, request->client_fd, "string") == 0){
-              int err;
-              if ( (err = openFile(request, filename) ) == 0) {
-                  writeClient("OK - File aperto correttamente", request->client_fd);
-              }
-              else if(err == 1)
-                  writeClient("ERROR - Un altro utente ha già fatto la lock su questo file", request->client_fd);
-              else {
-                  writeClient("ERROR - Impossibile aprire il file", request->client_fd);
-              }
-          }
-      }else if(strcmp(request->command, "UNLOCK_FILE") == 0){
-          char* filename = NULL;
-          if(readClient((void*)&filename, request->client_fd, "string") == 0){
-              int err;
-              if ( (err = unlockFile(request, filename) ) == 0) {
-                  writeClient("OK - File sbloccato correttamente", request->client_fd);
-              }
-              else if(err == 1)
-                  writeClient("ERROR - Un altro utente ha fatto la lock su questo file", request->client_fd);
-              else if(err == 2)
-                  writeClient("ALREADY UNLOCKED - Il file è già stato liberato", request->client_fd);
-              else {
-                  writeClient("ERROR - Impossibile trovare il file", request->client_fd);
-              }
-          }
-          if(filename)
-              free(filename);
-      }else if(strcmp(request->command, "WRITE_FILE") == 0){
-          char* filename = NULL;
-          if(readClient((void*)&filename, request->client_fd, "string") == 0){
-             if( writeFile(request, filename) == 0){
-                 printf("OK");
-             }else{
-                 printf("NOT OK");
-             }
-          }
-          if(filename)
-              free(filename);
-      }
+    //Invio codice del risultato e errno al client
+    int errno_copy = errno;
+    writen(request->client_fd, &result, sizeof(int));
+    writen(request->client_fd, &errno_copy, sizeof(int));
+    //Gli errori che lascerebbero lo storage inconsistente (ad es. fallimento di malloc, lock/unlock mutex)
+    //vengono marcati come fatali e non permettono al server di continuare
+    check_fatal:
+    if(result == FATAL){
+        exit(FATAL);
+    }
 
-        //Comunico al thread main il file descriptor del client da analizzare di nuovo
-        if ( write(request->pipe_write, &request->client_fd, sizeof(int)) <= 0){
-            printf("Errore scrittura pipe\n");
+    //Se l'operazione è una LOCK fallita NON rimetto il client tra i descrittori in attesa
+    //ma lo aggiungo ad un array di client che attendono di fare una lock
+    if(request->opcode == LOCK && result == FAILURE && errno_copy == EACCES){
+        if (server_addClientWaiting(request) != 0) exit(FATAL);
+        goto cleanup;
+    }
+
+    //Comunico al thread main il file descriptor del client da analizzare di nuovo
+    //soltanto se l'operazione non è una LOCK fallita
+    if (write(request->pipe_write, &request->client_fd, sizeof(int)) <= 0) {
+        perror("Errore scrittura pipe\n");
+        exit(FATAL);
+    }
+
+    if(request->opcode == UNLOCK && result == 0){
+        //Se è una unlock andata a buon fine posso riprovare le lock in attesa
+        int result_2;
+        result_2 = server_removeClientWaiting(request);
+        if(result_2 == FAILURE) goto cleanup;
+        if (write(request->pipe_write, &result_2, sizeof(int)) <= 0) {
+            perror("Errore scrittura pipe\n");
+            exit(FATAL);
         };
-
-        free(request->command);
-        free(request);
-
     }
+
+    cleanup:
+    free(request);
+    request = NULL;
 }
 
+int server_openFile(request_t* request) {
+    //Leggo dal client tutti i dati che mi servono, nell'ordine: flags di apertura, lunghezza nome del file, nome del file
+    int client_fd = (int)request->client_fd;
+    size_t filename_len = 0;
+    char* filename = NULL;
+    int flags;
+    int result = -1;
 
-int writeFile(request_t* request, char* filename){
-
-    if(!filename || strlen(filename) > MAX_FILENAME){
+    if (readn(client_fd, &flags, sizeof(int)) <= 0) return -1;
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
         errno = EINVAL;
         return -1;
     }
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(filename == NULL) return -1;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    filename[filename_len] = '\0';
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_openFile(request->storage, filename, flags, client_fd);
 
-    //Ricevo prima dimensione del contenuto del file e poi il contenuto
-    size_t file_len = 0;
-    void** file_content = NULL;
-    readn(request->client_fd, &file_len, sizeof(size_t));
-    if(file_len > request->myStorage->max_memoria){
+    if(result == 0)
+        return result;
+
+    cleanup:
+        if(filename)
+            free(filename);
+        return result;
+}
+
+int server_closeFile(request_t* request){
+
+    //Leggo dal client tutti i dati che mi servono, nell'ordine: lunghezza nome del file, nome del file
+    int client_fd = (int)request->client_fd;
+    size_t filename_len = 0;
+    char* filename = NULL;
+    int result = -1;
+
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
         errno = EINVAL;
         return -1;
     }
-    if(file_len != 0)
-        file_content = malloc(file_len);
-    if(!file_content && (file_len != 0)){
-        perror("Malloc");
-        close(request->client_fd);
-        exit(EXIT_FAILURE);
-    }
-    if(file_len != 0)
-        readn(request->client_fd, file_content, file_len);
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(filename == NULL) return -1;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    filename[filename_len] = '\0';
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_closeFile(request->storage, filename, client_fd);
 
-    //Controllo che il file esista prima di scriverlo
-    pthread_mutex_t storage_mutex = request->myStorage->storage_mutex;
-    if (manage_storage(&storage_mutex, "lock") != 0){
-        perror("Mutex");
-        close(request->client_fd);
-        exit(EXIT_FAILURE);
-    }
-    file_t* toWrite;
-    //Se esiste
-    if ( (toWrite = storage_findFile(request->myStorage, filename)) != NULL){
-        //Si può fare la write solo se prima è stata fatta la lock
-       if( toWrite->client_lock == request->client_fd){
-           list_t* expelledFiles = NULL;
-          if(storage_writeFileContent(request->myStorage, toWrite, filename, file_content, file_len, O_REPLACE, &expelledFiles) == 0) {
-              if (manage_storage(&storage_mutex, "unlock") != 0){
-                  perror("Mutex");
-                  close(request->client_fd);
-                  exit(EXIT_FAILURE);
-              }
+    cleanup:
+    if(filename)
+        free(filename);
+    return result;
 
-              //Comunico al client
-              if(expelledFiles != NULL && expelledFiles->num_elem != 0){
-                  //TODO INVIO I FILE ESPULSI AL CLIENT
-                  int i = 0;
-                  int max = expelledFiles->num_elem;
-                  while(i < max) {
-                      writeClient("EXPELLED", request->client_fd);
-                      elem_t* toDestroy = get_tail(expelledFiles);
-                      file_t* toSend = toDestroy->content;
-                      writeClient(toSend->nome_file, request->client_fd);
-                      writen(request->client_fd, &(toSend->dimensione_file), sizeof(int));
-                      if(toSend->dimensione_file != 0)
-                        writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
-                      printf("%s", (char*)toSend->contenuto_file);
-                      i++;
-                      file_clean(toSend);
-                      free(toDestroy);
-                  }
-                  list_destroy(expelledFiles, (void*)file_clean);
-                  writeClient("STOP", request->client_fd);
-              }
-              writeClient("OK", request->client_fd);
-              return 0;
-          }
-       }
-    }
-    free(file_content);
-    //Se non esiste
-    writeClient("ERROR", request->client_fd);
-    if (manage_storage(&storage_mutex, "unlock") != 0){
-        perror("Mutex");
-        close(request->client_fd);
-        exit(EXIT_FAILURE);
-    }
-    return -1;
 }
 
+int server_lockFile(request_t* request){
 
-int unlockFile(request_t* request, char* filename){
+    //Leggo dal client tutti i dati che mi servono, nell'ordine: lunghezza nome del file, nome del file
+    int client_fd = (int)request->client_fd;
+    size_t filename_len = 0;
+    char* filename = NULL;
+    int result = -1;
 
-    if(!request || !filename)
-        return -1;
-
-    //TODO check lock errors
-    manage_storage(&(request->myStorage->storage_mutex), "lock");
-    if (storage_findFile(request->myStorage, filename) == NULL) {
-        manage_storage(&(request->myStorage->storage_mutex), "unlock");
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
         return -1;
     }
-    int return_value = (storage_unlockFile(request->myStorage, filename, request->client_fd));
-    manage_storage(&(request->myStorage->storage_mutex), "unlock");
-    return return_value;
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(filename == NULL) return -1;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    filename[filename_len] = '\0';
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_lockFile(request->storage, filename, client_fd);
+
+    if(result == 0) {
+        free(filename);
+        return result;
+    }
+
+    cleanup:
+    if(filename)
+        free(filename);
+    return result;
 }
 
-int manage_storage(pthread_mutex_t* mutex, char* action){
+int server_unlockFile(request_t* request){
 
-    if (strcmp(action, "lock") == 0){
-        if (pthread_mutex_lock(mutex) != 0) {
-            //printf("ERRORE FATALE lock\n");
-            return -1;
-        }
-        return 0;
+    //Leggo dal client tutti i dati che mi servono, nell'ordine: lunghezza nome del file, nome del file
+    int client_fd = (int)request->client_fd;
+    size_t filename_len = 0;
+    char* filename = NULL;
+    int result = -1;
+
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(filename == NULL) return -1;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    filename[filename_len] = '\0';
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_unlockFile(request->storage, filename, client_fd);
+
+    if(result == 0) {
+        free(filename);
+        return result;
     }
 
-    if(strcmp(action, "unlock") == 0){
-        if (pthread_mutex_unlock(mutex) != 0) {
-            //printf("ERRORE FATALE unlock\n");
-            return -1;
-        }
-        return 0;
-    }
-
-    return 1;
+    cleanup:
+    if(filename)
+        free(filename);
+    return result;
 }
 
-int openFile(request_t* request, char* pathname) {
+int server_removeFile(request_t* request){
 
+    //Leggo dal client tutti i dati che mi servono, nell'ordine: lunghezza nome del file, nome del file
+    int client_fd = (int)request->client_fd;
+    size_t filename_len = 0;
+    char* filename = NULL;
+    int result = -1;
 
-    pthread_mutex_t *storage_mutex = &(request->myStorage->storage_mutex);
-    char *open_file_option = request->command;
-
-    //Controllo se è una richiesta con creazione
-    if (strncmp(open_file_option, "OPEN_FILE_CREATE", strlen("OPEN_FILE_CREATE")) == 0) {
-        //Prendo la lock sullo storage
-        if (manage_storage(storage_mutex, "lock") == 0) {
-
-            //Controllo se il file è già presente
-            if (storage_findFile(request->myStorage, pathname) == NULL) {
-                //faccio la unlock
-                manage_storage(storage_mutex, "unlock");
-                //Creo il file
-                file_t *newFile;
-                //controllo se c'è anche la lock
-                if (strcmp(open_file_option, "OPEN_FILE_CREATE_LOCK") == 0)
-                    newFile = file_create(pathname, 0, NULL, request->client_fd);
-                else
-                    newFile = file_create(pathname, 0, NULL, -1);
-
-                if (!newFile) {
-                    if(pathname) {
-                        free(pathname);
-                        pathname = NULL;
-                    }
-                    return -1;
-                }
-                //Ora lo aggiungo allo storage
-                if (manage_storage(storage_mutex, "lock") == 0) {
-                    //Ricontrollo la presenza del file nel caso in cui nel frattempo
-                    // un altro utente fosse subentrato
-                    //e avesse aggiunto un file con lo stesso nome
-                    if(storage_findFile(request->myStorage, pathname) != NULL){
-                        manage_storage(storage_mutex, "unlock");
-                        if(pathname) {
-                            free(pathname);
-                            pathname = NULL;
-                        }
-                        errno = EXIT_FAILURE;
-                        return -1;
-                    }
-                    list_t* expelledFiles = NULL;
-                        if (storage_addfile(request->myStorage, newFile, pathname, &expelledFiles) == -1) {
-                            manage_storage(storage_mutex, "unlock");
-                            if(pathname) {
-                                free(pathname);
-                                pathname = NULL;
-                            }
-                            if(expelledFiles){
-                                free(expelledFiles);
-                                expelledFiles = NULL;
-                            }
-                            errno = EXIT_FAILURE;
-                            return -1;
-                        }
-                        manage_storage(storage_mutex, "unlock");
-                        if(expelledFiles != NULL && expelledFiles->num_elem != 0){
-                            //TODO INVIO I FILE ESPULSI AL CLIENT
-                            int i = 0;
-                            int max = expelledFiles->num_elem;
-                            while(i < max) {
-                                writeClient("EXPELLED", request->client_fd);
-                                elem_t* toDestroy = get_tail(expelledFiles);
-                                file_t* toSend = toDestroy->content;
-                                writeClient(toSend->nome_file, request->client_fd);
-                                writen(request->client_fd, &(toSend->dimensione_file), sizeof(unsigned long));
-                                if(toSend->dimensione_file != 0)
-                                    writen(request->client_fd, toSend->contenuto_file, toSend->dimensione_file);
-
-                                //************TODO TEST
-                                char* content_to_string = malloc(toSend->dimensione_file+1);
-                                memcpy(content_to_string, toSend->contenuto_file, toSend->dimensione_file);
-                                content_to_string[toSend->dimensione_file] = '\0';
-                                printf("%s", content_to_string);
-
-                                i++;
-                                file_clean(toSend);
-                                free(toDestroy);
-                            }
-                            list_destroy(expelledFiles, (void*)file_clean);
-                            writeClient("STOP", request->client_fd);
-                        }
-                        //LA UNLOCK PRIMA ERA QUI, SE NON VA RIMETTERLA QUI
-                }
-                return 0;
-
-            } else { //Se il file è già presente ma è una richiesta di creazione allora esco con errore
-                manage_storage(storage_mutex, "unlock");
-                if(pathname) {
-                    free(pathname);
-                    pathname = NULL;
-                }
-                errno = EXIT_FAILURE;
-                return -1;
-            }
-
-        }
-        if(pathname) {
-            free(pathname);
-            pathname = NULL;
-        }
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
         return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(filename == NULL) return -1;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    filename[filename_len] = '\0';
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_removeFile(request->storage, filename, client_fd);
 
+    if(result == 0) {
+        free(filename);
+        return result;
     }
 
-    //Richiesta di apertura file senza creazione
-    else{
+    cleanup:
+    if(filename)
+        free(filename);
+    return result;
 
-        if (manage_storage(storage_mutex, "lock") == 0) {
+}
 
-            //Controllo se il file è presente
-            if (storage_findFile(request->myStorage, pathname) != NULL) {
-                //controllo se c'è la lock
-                if (strcmp(open_file_option, "OPEN_FILE_LOCK") == 0) {
-                    int err;
-                    //Faccio la lock del file
-                    if ( (err = storage_lockFile(request->myStorage, pathname, request->client_fd)) != 0){
-                        manage_storage(storage_mutex, "unlock");
-                        if(pathname) {
-                            free(pathname);
-                            pathname = NULL;
-                        }
-                        if(err == -1)
-                            return -1;
-                        if(err == 1)
-                            return 1;
-                    }
-                    manage_storage(storage_mutex, "unlock");
-                    if(pathname) {
-                        free(pathname);
-                        pathname = NULL;
-                    }
-                    return 0;
-                }
-                //faccio la unlock
-                manage_storage(storage_mutex, "unlock");
-                if(pathname) {
-                    free(pathname);
-                    pathname = NULL;
-                }
-                return 0;
+int server_writeFile(request_t* request){
 
-            }else{ //Se invece il file non è presente esco con errore
-                manage_storage(storage_mutex, "unlock");
-                if(pathname) {
-                    free(pathname);
-                    pathname = NULL;
-                }
-                errno = ENOENT;
-                return -1;
-            }
+    int client_fd = (int)request->client_fd;
+
+    //Leggo dal client nell'ordine: lunghezza nome file, nome file, dimensione del file in bytes, contenuto
+    int filename_len; char* filename; size_t file_size; void* file_data;
+    if (readn(client_fd, &filename_len, sizeof(int)) <= 0) return -1;
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    filename[filename_len] = '\0';
+    if (readn(client_fd, &filename, filename_len) <= 0) return -1;
+    if (readn(client_fd, &file_size, sizeof(size_t)) <= 0) return -1;
+    file_data = malloc(file_size);
+    if (readn(client_fd, file_data, file_size) <= 0) return -1;
+
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    int result = -1;
+    list_t* expelled_files = NULL;
+    result = storage_writeFile(request->storage, filename, file_size, file_data, client_fd, expelled_files);
+
+    //Comunico al client se la scrittura è andata a buon fine
+    int errno_copy = errno;
+    if( writen(request->client_fd, &result, sizeof(int))  <= 0) return FATAL;
+    if( writen(request->client_fd, &errno_copy, sizeof(int)) <= 0) return FATAL;
+    if(result == FATAL){
+        exit(FATAL);
+    }
+    //Se non è andata a buon fine esco
+    if(result != 0) goto  cleanup;
+
+    //Controllo se ci sono file da inviare
+    size_t exp_file_size;
+    if(expelled_files == NULL){
+        while(expelled_files->num_elem > 0){
+            elem_t* elem = list_remove_head(expelled_files);
+            file_t* exp_file = elem->content;
+            exp_file_size = exp_file->size;
+            size_t exp_file_name_len = strlen(exp_file->filename);
+            //Invio la dimensione del file
+            if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) return FATAL;
+            //Invio i restanti dati del file, nell'ordine: lunghezza nome file, nome file, contenuto
+            if( writen(request->client_fd, &exp_file_name_len, sizeof(size_t)) <= 0) return FATAL;
+            if( writen(request->client_fd, exp_file->filename, exp_file_name_len) <= 0) return FATAL;
+            if( writen(request->client_fd, exp_file->content, exp_file_size) <= 0) return FATAL;
+
+            file_destroy(exp_file);
+            if(elem->content) free(elem->content);
+            if(elem) free(elem);
         }
     }
-    if(pathname) {
-        free(pathname);
-        pathname = NULL;
-    }
-    return -1;
-}
+    //Invio 0 per dire al client che non ci sono più file
+    exp_file_size = 0;
+    if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) return FATAL;
 
-int readClient(void** content, int client_fd, const char* contentType){
-    unsigned long len = 0;
-
-    if (readn(client_fd, &len, sizeof(int) ) == -1){
-        printf("Errore nel thread durante lettura da client %d\n", client_fd);
-        fflush(stdout);
-        return -1;
-    }
-
-    if(strcmp(contentType, "string") == 0)
-        *content = (char*)calloc(len+1, sizeof(char));
-    if(strcmp(contentType, "file") == 0)
-        *content = calloc(len, 1);
-    if(!*content)
-        return -1;
-
-    if (readn(client_fd, *content, len ) == -1){
-        printf("Errore nel thread durante lettura da client %d\n", client_fd);
-        fflush(stdout);
-        free(*content);
-        return -1;
-    }
-
-
-    return 0;
+    cleanup:
+    if(filename)
+        free(filename);
+    return result;
 
 
 }
 
+int server_addClientWaiting(request_t* request){
 
-int readClientSingle(void* content, int client_fd, size_t size){
-    fflush(stdout);
-    if (readn(client_fd, content, size ) == -1){
-        printf("Errore nel thread durante lettura da client %d\n", client_fd);
-        return -1;
-    }
-
-    return 0;
+    return storage_addClientWaiting(request->storage, (int)request->client_fd);
 }
 
-int writeClient(char* msg, int client_fd){
-    fflush(stdout);
-    size_t len = strlen(msg);
-    if (writen(client_fd, &len, sizeof(int) ) != 1){
-        printf("Errore nel thread durante scrittura verso client %d\n", client_fd);
-        return -1;
-    }
-    if (writen(client_fd, msg, len+1 ) != 1){
-        printf("Errore nel thread durante scrittura verso client %d\n", client_fd);
-        return -1;
-    }
+int server_removeClientWaiting(request_t* request){
 
-    return 0;
+    return storage_removeClientWaiting(request->storage);
 }
