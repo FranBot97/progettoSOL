@@ -58,7 +58,9 @@ int storage_lockFile(storage_t* storage, char* filename, int client);
 
 int storage_unlockFile(storage_t* storage, const char* filename, int client);
 
-int storage_writeFile(storage_t* storage, const char* filename, size_t file_size, void* file_content, int client, list_t* list);
+int storage_writeFile(storage_t* storage, const char* filename, size_t file_size, void* file_content, int client, list_t** list);
+//Restituisce numero bytes letti
+long long storage_readFile(storage_t* storage, char* filename, int client, void** buf);
 
 // Funzioni di supporto //
 int storage_addClientWaiting(storage_t* storage, int client);
