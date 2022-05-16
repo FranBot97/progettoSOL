@@ -5,15 +5,11 @@
 #include <request_handler.h>
 #include <stdlib.h>
 #include <storage.h>
-#include <pthread.h>
 #include <util.h>
 #include <string.h>
 #include <errno.h>
-#include <signal.h>
 #include <request.h>
-#include <stdbool.h>
 
-//TODO sistemare con una unica write OK write ERROR
 void request_handler_function(request_t* request) {
 
     if (!request)
@@ -34,6 +30,8 @@ void request_handler_function(request_t* request) {
             goto check_fatal;
             break;
         case READ:
+            result = server_readFile(request);
+            goto check_fatal;
             break;
         case READN:
             break;
@@ -87,7 +85,7 @@ void request_handler_function(request_t* request) {
         if (write(request->pipe_write, &result_2, sizeof(int)) <= 0) {
             perror("Errore scrittura pipe\n");
             exit(FATAL);
-        };
+        }
     }
 
     cleanup:
@@ -127,6 +125,110 @@ int server_openFile(request_t* request) {
         if(filename)
             free(filename);
         return result;
+}
+
+int server_writeFile(request_t* request){
+
+    int client_fd = (int)request->client_fd;
+    int result = -1;
+
+    //Leggo dal client nell'ordine: lunghezza nome file, nome file, dimensione del file in bytes, contenuto
+    int filename_len; char* filename = NULL; off_t file_size; void* file_data = NULL;
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(!filename) return FATAL;
+    filename[filename_len] = '\0';
+    if (readn(client_fd, filename, filename_len) <= 0) goto cleanup;
+    if (readn(client_fd, &file_size, sizeof(off_t)) <= 0) goto cleanup;
+    file_data = malloc(file_size);
+    if(!file_data) return FATAL;
+    if (readn(client_fd, file_data, file_size) <= 0) goto cleanup;
+
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    list_t* expelled_files = NULL;
+    result = storage_writeFile(request->storage, filename, file_size, file_data, client_fd, &expelled_files);
+
+    //Comunico al client se la scrittura è andata a buon fine
+    int errno_copy = errno;
+    if( writen(request->client_fd, &result, sizeof(int))  <= 0) goto cleanup;
+    if( writen(request->client_fd, &errno_copy, sizeof(int)) <= 0) goto cleanup;
+    if(result == FATAL){
+        exit(FATAL);
+    }
+    //Se non è andata a buon fine esco
+    if(result != 0) goto  cleanup;
+
+    //Controllo se ci sono file da inviare
+    size_t exp_file_size;
+    if(expelled_files != NULL){
+        while(expelled_files->num_elem > 0){
+            elem_t* elem = list_remove_head(expelled_files);
+            file_t* exp_file = elem->content;
+            exp_file_size = exp_file->size;
+            size_t exp_file_name_len = strlen(exp_file->filename);
+            //Invio la dimensione del file
+            if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) goto cleanup;
+            //Invio i restanti dati del file, nell'ordine: lunghezza nome file, nome file, contenuto
+            if( writen(request->client_fd, &exp_file_name_len, sizeof(size_t)) <= 0) goto cleanup;
+            if( writen(request->client_fd, exp_file->filename, exp_file_name_len) <= 0) goto cleanup;
+            if( writen(request->client_fd, exp_file->content, exp_file_size) <= 0) goto cleanup;
+
+            file_destroy(exp_file);
+            //if(elem->content) free(elem->content);
+            if(elem) free(elem);
+        }
+        list_destroy(expelled_files, NULL);
+    }
+    //Invio 0 per dire al client che non ci sono più file
+    exp_file_size = 0;
+    if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) goto cleanup;
+
+
+    cleanup:
+    if(filename)
+        free(filename);
+    if(file_data && result == -1)
+        free(file_data);
+    return result;
+
+
+}
+
+int server_readFile(request_t* request){
+
+    int client_fd = (int)request->client_fd;
+    long long result = -1;
+    void* file_content = NULL;
+    size_t file_size = 0;
+
+    //Leggo dal client nell'ordine: lunghezza nome file, nome file
+    size_t filename_len;
+    char* filename = NULL;
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    filename = (char*)malloc(filename_len*sizeof(char)+1);
+    if(!filename) return FATAL;
+    filename[filename_len] = '\0';
+    if (readn(client_fd, filename, filename_len) <= 0) goto cleanup;
+
+    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
+    result = storage_readFile(request->storage, filename, client_fd, &file_content);
+
+    //Se result <= 0 invio l'errore al client e esco
+    if(result <= 0){
+        if (writen(client_fd, &result, sizeof(long long)) <= 0) goto cleanup;
+        goto cleanup;
+    }
+
+    //Altrimenti result rappresenta il numero di bytes letti
+    file_size = result;
+    // Invio il contenuto del file al client, nell'ordine: dimensione e contenuto
+    if (writen(client_fd, &file_size, sizeof(size_t)) <= 0) goto cleanup;
+    if (writen(client_fd, file_content, file_size) <= 0) goto cleanup;
+
+    cleanup:
+    if(filename) free(filename);
+    if(file_content) free(file_content);
+    return (int)result;
 }
 
 int server_closeFile(request_t* request){
@@ -263,67 +365,6 @@ int server_removeFile(request_t* request){
     if(filename)
         free(filename);
     return result;
-
-}
-
-int server_writeFile(request_t* request){
-
-    int client_fd = (int)request->client_fd;
-
-    //Leggo dal client nell'ordine: lunghezza nome file, nome file, dimensione del file in bytes, contenuto
-    int filename_len; char* filename; size_t file_size; void* file_data;
-    if (readn(client_fd, &filename_len, sizeof(int)) <= 0) return -1;
-    filename = (char*)malloc(filename_len*sizeof(char)+1);
-    filename[filename_len] = '\0';
-    if (readn(client_fd, &filename, filename_len) <= 0) return -1;
-    if (readn(client_fd, &file_size, sizeof(size_t)) <= 0) return -1;
-    file_data = malloc(file_size);
-    if (readn(client_fd, file_data, file_size) <= 0) return -1;
-
-    //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
-    int result = -1;
-    list_t* expelled_files = NULL;
-    result = storage_writeFile(request->storage, filename, file_size, file_data, client_fd, expelled_files);
-
-    //Comunico al client se la scrittura è andata a buon fine
-    int errno_copy = errno;
-    if( writen(request->client_fd, &result, sizeof(int))  <= 0) return FATAL;
-    if( writen(request->client_fd, &errno_copy, sizeof(int)) <= 0) return FATAL;
-    if(result == FATAL){
-        exit(FATAL);
-    }
-    //Se non è andata a buon fine esco
-    if(result != 0) goto  cleanup;
-
-    //Controllo se ci sono file da inviare
-    size_t exp_file_size;
-    if(expelled_files == NULL){
-        while(expelled_files->num_elem > 0){
-            elem_t* elem = list_remove_head(expelled_files);
-            file_t* exp_file = elem->content;
-            exp_file_size = exp_file->size;
-            size_t exp_file_name_len = strlen(exp_file->filename);
-            //Invio la dimensione del file
-            if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) return FATAL;
-            //Invio i restanti dati del file, nell'ordine: lunghezza nome file, nome file, contenuto
-            if( writen(request->client_fd, &exp_file_name_len, sizeof(size_t)) <= 0) return FATAL;
-            if( writen(request->client_fd, exp_file->filename, exp_file_name_len) <= 0) return FATAL;
-            if( writen(request->client_fd, exp_file->content, exp_file_size) <= 0) return FATAL;
-
-            file_destroy(exp_file);
-            if(elem->content) free(elem->content);
-            if(elem) free(elem);
-        }
-    }
-    //Invio 0 per dire al client che non ci sono più file
-    exp_file_size = 0;
-    if( writen(request->client_fd, &exp_file_size, sizeof(size_t)) <= 0) return FATAL;
-
-    cleanup:
-    if(filename)
-        free(filename);
-    return result;
-
 
 }
 

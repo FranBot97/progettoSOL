@@ -252,13 +252,14 @@ int writeFile(const char* pathname, const char* dirname){
         errno = EINVAL;
         return -1;
     }
-    if(strcmp(lastOpenedFlags, pathname) != 0){
+    if(strcmp(lastOpenedFlags, filename) != 0){
         //Controllo se è l'ultimo file su cui ho eseguito la open con entrambi i flag
         errno = EPERM;
         return -1;
     }
 
     int opcode = WRITE;
+    printf("%zu,%s,%ld ", filename_len, filename, file_size);
     //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file, dimensione del file in bytes, contenuto
     if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
     if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
@@ -280,9 +281,11 @@ int writeFile(const char* pathname, const char* dirname){
     //Aspetto eventuali file espulsi: leggo la dimensione del prossimo file espulso, quando ricevo 0 mi fermo
     size_t storedFile_len = 0;
     size_t storedFile_name_len = 0;
-    char storedFile_name[MAX_FILENAME];
+    char storedFile_name[MAX_FILENAME] = "";
     void* storedFile_data = NULL;
-    DIR* dir = opendir(dirname);
+    DIR* dir = NULL;
+    if(dirname) dir = opendir(dirname);
+    if(!dir) perror("Write file - percorso cartella associata");
     do{
         if (readn(socket_fd, &storedFile_len, sizeof(size_t)) <= 0) return -1;
         if(storedFile_len == 0) break; //Quando ricevo 0 esco
@@ -291,13 +294,13 @@ int writeFile(const char* pathname, const char* dirname){
         //Ricevo i restanti dati del file, nell'ordine: lunghezza nome file, nome file, contenuto
         if (readn(socket_fd, &storedFile_name_len, sizeof(size_t)) <= 0) return -1;
         if (readn(socket_fd, storedFile_name, storedFile_name_len) <= 0) return -1;
-        if (readn(socket_fd, data, storedFile_len) <= 0) return -1;
+        if (readn(socket_fd, storedFile_data, storedFile_len) <= 0) return -1;
 
         //Salvo il file nella cartella SOLO SE specificata e già esistente nel dispositivo
         if(dirname != NULL && dir ) {
-            char complete_path[MAX_PATH + MAX_FILENAME];
+            char complete_path[MAX_PATH + MAX_FILENAME] = "";
             strcpy(complete_path, dirname);
-            if (complete_path[strlen(complete_path)] != '/') strcat(complete_path, "/");
+            if (complete_path[strlen(complete_path)-1] != '/') strcat(complete_path, "/");
             strcat(complete_path, storedFile_name);
             //Creo e scrivo il file ricevuto
             FILE* storedFile = fopen(complete_path, "wb");
@@ -311,11 +314,54 @@ int writeFile(const char* pathname, const char* dirname){
             }
             if(storedFile) fclose(storedFile);
         }
+        if(storedFile_data) free(storedFile_data);
+        storedFile_data = NULL;
     }while(true);
 
     if(storedFile_data) free(storedFile_data);
     if(dir) closedir(dir);
     if(storedFile_data) free(storedFile_data);
+    return 0;
+}
+
+int readFile(const char* pathname, void** buf, size_t* size){
+
+    if(!pathname){
+        errno = EINVAL;
+        return -1;
+    }
+
+    //Parsing nome del file
+    char pathname_to_parse[MAX_PATH];
+    strcpy(pathname_to_parse, pathname);
+    char filename[MAX_FILENAME];
+    parseFilename(pathname_to_parse, filename);
+    size_t filename_len = strlen(filename);
+    if(filename_len > MAX_FILENAME){
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if(filename_len <= 0){
+        errno = EINVAL;
+        return -1;
+    }
+
+    int opcode = READ;
+
+    //Invio dati al server, nell'ordine: codice op, lunghezza nome file, nome file, dimensione del file in bytes, contenuto
+    if (writen(socket_fd, &opcode, sizeof(int)) <= 0) return -1;
+    if (writen(socket_fd, &filename_len, sizeof(size_t)) <= 0) return -1;
+    if (writen(socket_fd, filename, filename_len) <= 0) return -1;
+
+    //Aspetto il responso, nell'ordine: dimensione del file letto e contenuto
+    if (readn(socket_fd, size, sizeof(long long)) <= 0) return -1;
+    if(*size == 0){
+        errno = ENODATA;
+        return -1;
+    }
+    *buf = malloc(*size); if(!buf) return -1;
+    if (readn(socket_fd, *buf, *size) <= 0) return -1;
+
     return 0;
 }
 
@@ -474,7 +520,7 @@ int removeFile(const char* pathname){
 
     //Se è andato a buon fine ok
     if (response == 0) {
-        if(strcmp(lastOpenedFlags, pathname) == 0) strcpy(lastOpenedFlags, "");
+        if(strcmp(lastOpenedFlags, filename) == 0) strcpy(lastOpenedFlags, "");
         return response;
     }
 

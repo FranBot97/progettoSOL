@@ -7,6 +7,7 @@
 #include <API.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <dirent.h>
 
 char sockname[MAX_SOCKNAME];
 
@@ -38,7 +39,7 @@ int main(int argc, char* argv[]) {
     /*Inizio gestione input*/
 
     int opt; //identificativo opt
-    bool h_opt = false; //ci dice se ho già usato il comando "-h"
+    //bool h_opt = false; //ci dice se ho già usato il comando "-h"
     bool f_opt = false; //ci dice se ho già usato con successo il comando "-f"
     bool get_opt = false;
     bool R_has_args = true;
@@ -53,6 +54,12 @@ int main(int argc, char* argv[]) {
 
         if(strcmp(argv[i], "-p") == 0)
             printInfo = true;
+
+        //Se trova -h stampa e termina
+        if(strcmp(argv[i], "-h") == 0) {
+            print_help();
+            return 0;
+        }
     }
 
     while (get_opt || ((opt = getopt(argc, argv, ":hf:w:W:D:r:d:R:t:l:u:c:pq")) != -1)) {
@@ -61,33 +68,24 @@ int main(int argc, char* argv[]) {
 
         switch (opt) {
 
-            case 'h':
-                if (!h_opt) print_help();    //evita stampe multiple
-                h_opt = true;
-                break;
 
             case 'f':
-                if (!f_opt) {//evita connessioni multiple
-
+                if (!f_opt) {   //evita connessioni multiple
                     if (checkArgument(optarg) == -1) {
                         optind--;
                         get_opt = false;
                         printf("Option -f requires an argument\n");
                         break;
                     }
-
                     size_t len = strlen(optarg);
                     if (len > MAX_SOCKNAME) {
                         printf("Nome socket troppo lungo, massimo %d caratteri\n", MAX_SOCKNAME);
                         return -1;
                     }
-
                     strncpy(sockname, optarg, MAX_SOCKNAME - 1);
-
                     //Eventuale attesa
                     if (msec > 0)
                         sleep(msec / 1000);
-
                     if (openConnection(sockname, RETRY_CONN_MSEC, timeLimit) == 0) {
                         f_opt = true;
                     }
@@ -95,22 +93,36 @@ int main(int argc, char* argv[]) {
                     printf("Sei già connesso alla socket %s\n", sockname);
                 break;
 
-            case 'w':
+
+
+            case 'w': //-w dirname[,n=0]
                 //TODO
-            {
-                char pathname[MAX_ARGLEN];
+            {   char dirname[MAX_PATH];
+                char store_dirname[MAX_PATH] = "";
+                long N = 0;
+                //Se non ha argomento
                 if (checkArgument(optarg) == -1) {
                     optind--;
                     get_opt = false;
                     printf("Option -w requires an argument\n");
                     break;
                 } else {
-                    strcpy(pathname, optarg);
+                    //Divido il nome della cartella da N se presente
+                    char *token;
+                    char *rest = NULL;
+                    token = strtok_r(optarg, ",", &rest);
+                    strncpy(dirname, token, MAX_PATH);
+                    token = strtok_r(NULL, ",", &rest);
+                    if(token)
+                     if(isNumber(token, &N) != 0 || N<0) {
+                         printf("Option -w: il secondo parametro non è un numero valido\n");
+                         return -1;
+                     }
                 }
                 opt = getopt(argc, argv, ":hf:w:W:D:r:R:d:t:l:u:c:p");
                 if (opt == -1) {
-
-                } else {
+                //Non ho associato l'opzione -D
+                } else { //Ho associato l'opzione -D, ne controllo la validità
                     switch (opt) {
                         case 'D':
                             if (!f_opt) {
@@ -125,7 +137,8 @@ int main(int argc, char* argv[]) {
                                 break;
                             }
                             get_opt = false;
-                            //todo opero con la cartella
+                            //Salvo il nome della cartella
+                            strncpy(store_dirname, optarg, MAX_ARGLEN-1);
                             break;
                         case '?':
                             get_opt = true;
@@ -135,14 +148,22 @@ int main(int argc, char* argv[]) {
                     }
                     break;
                 }
-                //dato che "optarg" è il nome della cartella vado ricorsivamente
-                //a fare per ogni file la "writeFile"
-                //invia file dalla cartella
-                char name[MAX_FILENAME];
-                parseFilename(pathname, name);
-                printf("%s", name);
+                //Svolgo l'operazione: vado ricorsivamente ad analizzare la cartella
+                //finché non leggo tutti i file o finché non leggo N files
+                int count = 1;
+                while(true){
+                    if(count == N) break;
+                    /*********************************/
+
+                    break; //TODO ricerca ricorsiva in cartella e funzione
+
+                    /********************************/
+                }
                 break;
             }
+
+
+
             case 'W': {
                 char argument[MAX_ARGLEN];
                 char *directory = NULL;
@@ -168,7 +189,7 @@ int main(int argc, char* argv[]) {
                                 break;
                             }
                             get_opt = false;
-                            //todo opero con la cartella
+                            //Devo salvare la cartella
                             directory = malloc(sizeof(char) * strlen(optarg) + 1);
                             if (!directory) {
                                 perror("Malloc");
@@ -188,29 +209,39 @@ int main(int argc, char* argv[]) {
                     get_opt = false;
                     break;
                 }
-
-                //invia file specificati senza opzione -D
+                //Eseguo le operazioni per ogni file
                 char *filepath;
                 char *rest = NULL;
                 filepath = strtok_r(argument, ",", &rest);
-
                 while (filepath != NULL) {
                     if (openFile(filepath, O_CREATE | O_LOCK) == 0)
                         printf("File aperto\n");
-                    /*if (writeFile(filepath, directory) != 0) {
+                    if (openFile(filepath, 0) == 0)
+                        printf("File aperto\n");
+                    sleep(10);
+                    if (writeFile(filepath, directory) != 0) {
                         printf("Impossibile scrivere il file\n");
+                        perror("Errore");
                     } else {
-                        printf("FIle scritto\n");
-                    }*/
-                    /*if (closeFile(filepath) == 0)
-                        printf("File chiuso\n");*/
-
+                        printf("File scritto\n");
+                    }
+                    //EXTRA
+                    void* buf;
+                    size_t len;
+                    if(readFile(filepath, &buf, &len) == 0){
+                        printf("File letto correttamente\n");
+                        FILE* f = fopen(filepath, "wb");
+                        fwrite(buf, 1, len, f);
+                    }else{
+                        printf("File non letto \n");
+                    }
+                   // if (closeFile(filepath) == 0)
+                        //printf("File chiuso\n");
                     filepath = strtok_r(NULL, ",", &rest);
                 }
                 printf("Termine\n");
                 if (directory)
                     free(directory);
-
                 break;
             }
             case 'D':
@@ -252,27 +283,16 @@ int main(int argc, char* argv[]) {
                     break;
                 }
                 //Legge file specificati
-
-                if (openFile(pathname, O_LOCK | O_CREATE) == 0){
+                if (openFile(pathname, 0) == 0){
                     printf("File aperto correttamente\n");
                 }else{
                     printf("File non aperto\n");
                 }
-                if(writeFile(pathname, NULL) == 0){
-                    printf("File letto");
-                }
-                if (removeFile(pathname) == 0) printf("File rimosso\n");
-               /* if (openFile(pathname, 0) == 0){
-                    printf("File aperto correttamente\n");
+                if(closeFile(pathname) == 0){
+                    printf("File chiuso\n");
                 }else{
-                    printf("File non aperto\n");
-                }*/
-                //sleep(5);
-                //if (lockFile(pathname) == 0) printf("File locked");
-                fflush(stdout);
-                //sleep(5);
-                //if (unlockFile(pathname) == 0) printf("File unlocked");
-
+                    printf("Impossisbile chiudere il file\n");
+                }
 
                 //void *buf;
                 //size_t size;
@@ -521,10 +541,6 @@ int main(int argc, char* argv[]) {
                 }
                 break;
 
-            case 'q':
-             //   quit();
-                break;
-
             case '?':
                 printf("Comando sconosciuto -%c\n", optopt);
                 break;
@@ -539,6 +555,7 @@ int main(int argc, char* argv[]) {
                        break;
                    }else{
                        printf("Option %c requires an argument\n", optopt);
+                       break;
                    }
             }
 

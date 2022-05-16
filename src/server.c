@@ -29,11 +29,8 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKE
 //Gestore segnali
 bool NO_MORE_CONNECTIONS = false;
 bool NO_MORE_REQUESTS = false;
-void signals_check(int sig);
-
-
-
-
+static void signals_checker(void* arg);
+static int signal_pipe[2]; //pipe per segnali
 
 /****************************/
 //      MAIN START
@@ -63,19 +60,20 @@ int main(int argc, char* argv[]) {
     struct sigaction sig_action;
     sigset_t sigset;
     memset(&sig_action, 0, sizeof(sig_action));
-    sig_action.sa_handler = signals_check;
+    sig_action.sa_handler = SIG_IGN;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGINT);
     sigaddset(&sigset, SIGHUP);
     sigaddset(&sigset, SIGQUIT);
     sig_action.sa_mask = sigset;
-    if (sigaction(SIGINT, &sig_action, NULL)!= 0
-    ||  sigaction(SIGHUP, &sig_action, NULL)!=0
-    ||  sigaction(SIGQUIT, &sig_action, NULL)!=0
-    ||  sigaction(SIGPIPE, &sig_action, NULL)!=0) {
+    pthread_t signal_thread = 0;
+    bool signal_thread_activated = false;
+    //PIPE: [0] per lettura, [1] scrittura
+    if(pipe(signal_pipe) == -1){
+        printf("Errore nella creazione della pipe\n");
         goto cleanup;
     }
-
+    if (pthread_sigmask(SIG_BLOCK, &sigset, NULL) != 0) goto cleanup;
 
     //LETTURA FILE CONFIGURAZIONE
      int opt;
@@ -154,6 +152,11 @@ int main(int argc, char* argv[]) {
      FD_ZERO(&rdset);
      FD_SET(socket_fd, &set);
      FD_SET(pfd[0], &set);
+     FD_SET(signal_pipe[0], &set);
+     //Adesso che ho assegnato la pipe faccio partire il thread dei segnali
+    if (pthread_create(&signal_thread, NULL, (void *(*)(void *)) &signals_checker, (void*)&sigset) != 0) goto cleanup;
+    signal_thread_activated = true;
+
      int fdmax = (socket_fd > pfd[0] ? socket_fd : pfd[0]);
 
      printf(" In attesa di nuove connessioni...  \n");
@@ -169,6 +172,7 @@ int main(int argc, char* argv[]) {
 
            //Se non accetto più nessuna richiesta esco
             if(NO_MORE_REQUESTS == true){
+                printf("Ok");
                 goto cleanup;
             }
             //Se non accetto più nuove connessioni e tutti i client attivi si sono disconnessi esco
@@ -208,6 +212,10 @@ int main(int argc, char* argv[]) {
                        printf("Errore lettura pipe\n");
                        continue;
                    }
+               }
+               //Se è il thread dei segnali che mi dice di svegliarmi lo ignoro
+               if (i == signal_pipe[0]){
+                   continue;
                }
 
                //Altrimenti è una richiesta da parte di un client
@@ -264,6 +272,9 @@ int main(int argc, char* argv[]) {
         storage_destroy(myStorage);
      if(socket_fd != -1)
         close(socket_fd);
+     if(signal_thread_activated)
+         pthread_kill(signal_thread, SIGKILL);
+     pthread_join(signal_thread, NULL);
 
      //EXIT
      exit:
@@ -286,20 +297,25 @@ int updatemax(fd_set set, int fdmax){
 
 //SIGINT, SIGTERM, SIGQUIT ---> NO_MORE_CONNECTIONS = true; NO_MORE_REQUESTS = true;
 //SIGHUP --> NO_MORE_CONNECTIONS = true; NO_MORE_REQUESTS = false;
-void signals_check(int sig){
-
-        switch (sig)
+static void signals_checker(void* arg){
+    printf(" !   Segnali abilitati   !\n");
+    sigset_t* sigset = (sigset_t*) arg;
+    int signal;
+    if( sigwait(sigset, &signal) != 0) exit(EXIT_FAILURE);
+    //printf("Segnale\n");
+        switch (signal)
         {
             case SIGINT:
-           // case SIGTERM:
             case SIGQUIT:
                 NO_MORE_CONNECTIONS = true;
                 NO_MORE_REQUESTS = true;
+                printf("Terminazione immediata\n");
                 break;
 
             case SIGHUP:
                 NO_MORE_CONNECTIONS = true;
                 NO_MORE_REQUESTS = false;
+                printf("Terminazione in corso ... in attesa che tutti i client si disconnettano\n");
                 break;
 
             case SIGPIPE:
@@ -307,6 +323,11 @@ void signals_check(int sig){
                 break;
 
         }
+        char msg[10] = "wake up!";
+    if(write(signal_pipe[1], msg, sizeof(msg)) <= 0) {
+        perror("Errore scrittura pipe\n");
+        exit(FATAL);
+    }
 }
 
 
