@@ -17,7 +17,7 @@ int server_openFile(request_t* request);
 
 int server_readFile(request_t* request);
 
-int server_readNFiles(request_t* request, int N);
+int server_readNFiles(request_t* request);
 
 int server_writeFile(request_t* request);
 
@@ -37,5 +37,8 @@ int server_removeFile(request_t* request);
 int server_addClientWaiting(request_t* request);
 
 int server_removeClientWaiting(request_t* request);
+
+int write_logfile(request_t* request, const char* OP, int IDCLIENT, unsigned int DELETED_BYTES, unsigned int ADDED_BYTES,
+                  unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME);
 
 #endif //REQUEST_HANDLER_H

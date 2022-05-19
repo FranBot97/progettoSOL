@@ -13,6 +13,9 @@ typedef struct request{
     long client_fd;
     storage_t* storage;
     int pipe_write;
+    //logfile + mutex
+    FILE *logfile;
+    pthread_mutex_t* logfile_mutex;
 } request_t;
 
 
@@ -25,6 +28,7 @@ enum opcode_{
     UNLOCK = 6,
     REMOVE = 7,
     CLOSE = 8,
+    APPEND = 9,
     NONE = 0,
     SHUTDOWN = -1
 };
@@ -37,7 +41,7 @@ enum flags_   {
 enum errors_{
     SUCCESS = 0,
     FAILURE = -1,
-    FATAL = 1,
+    FATAL = -2,
 };
 
 

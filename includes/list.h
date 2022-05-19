@@ -41,6 +41,8 @@ elem_t* list_prepend(list_t* list, void* content);
 
 elem_t* list_get_head(list_t* list);
 
+elem_t* list_getNext(list_t* list, elem_t* elem);
+
 elem_t* list_remove_head(list_t* list);
 
 elem_t* list_get_tail(list_t* list);

@@ -89,8 +89,7 @@ static inline int isNumber(const char* s, long* n) {
 }
 
 
-static inline int parseFilename(char* pathname, char* result){
-
+static inline void parseFilename(char* pathname, char* result){
     char* filename;
     char name[MAX_FILENAME];
     char* rest = NULL;
@@ -100,7 +99,6 @@ static inline int parseFilename(char* pathname, char* result){
         filename = strtok_r(NULL, "/", &rest);
     }
     strcpy(result, name);
-    return 0;
 }
 
 static inline unsigned int fnv_hash_function( void *key, int len ) {

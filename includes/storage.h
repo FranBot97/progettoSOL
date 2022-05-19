@@ -52,15 +52,20 @@ int storage_openFile(storage_t* storage, char* filename, int flags, int client);
 
 int storage_closeFile(storage_t* storage, char* filename, int client);
 
-int storage_removeFile(storage_t* storage, char* filename, int client);
+int storage_removeFile(storage_t* storage, char* filename, int client, unsigned int* deleted_bytes);
 
 int storage_lockFile(storage_t* storage, char* filename, int client);
 
 int storage_unlockFile(storage_t* storage, const char* filename, int client);
 
 int storage_writeFile(storage_t* storage, const char* filename, size_t file_size, void* file_content, int client, list_t** list);
+
+int storage_appendToFile(storage_t* storage, char* filename, size_t size, void* data, int client, list_t** list);
+
 //Restituisce numero bytes letti
 long long storage_readFile(storage_t* storage, char* filename, int client, void** buf);
+//Restituisce numero di file letti
+int storage_readNFiles(storage_t* storage, int client, int N, list_t** files_to_send);
 
 // Funzioni di supporto //
 int storage_addClientWaiting(storage_t* storage, int client);
