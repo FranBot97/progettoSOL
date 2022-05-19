@@ -297,6 +297,12 @@ elem_t* list_remove_elem(list_t* list, void* value, int (*compare_function)(void
     return NULL;
 }
 
+//Passato un puntatore ad un elemento restituisce elem->next, utilizzata per iterare
+elem_t* list_getNext(list_t* list, elem_t* elem){
+    if(list == NULL || elem == NULL) return NULL;
+    else
+        return elem->next;
+}
 
 
 /**

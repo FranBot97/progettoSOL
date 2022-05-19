@@ -10,18 +10,18 @@
 #include <unistd.h>
 #include <errno.h>
 #include <threadpool.h>
+#include <request.h>
 
 /**
  * @function void *threadpool_thread(void *threadpool)
  * @brief funzione eseguita dal thread worker che appartiene al pool
  */
-static void *workerpool_thread(void *threadpool) {
+static int *workerpool_thread(void *threadpool) {
     threadpool_t *pool = (threadpool_t *) threadpool; // cast
     taskfun_t task;  // generic task
     pthread_t self = pthread_self();
     int myid = -1;
 
-    // non efficiente, si puo' fare meglio.....
     do {
         for (int i = 0; i < pool->numthreads; ++i)
             if (pthread_equal(pool->threads[i], self)) {
@@ -34,6 +34,7 @@ static void *workerpool_thread(void *threadpool) {
         printf("ERRORE FATALE lock\n");
         return NULL;
     }
+
     for (;;) {
 
         // in attesa di un messaggio, controllo spurious wakeups.
@@ -61,7 +62,7 @@ static void *workerpool_thread(void *threadpool) {
         }
              /*eseguo la funzione*/
              printf("Thread %d in esecuzione..", myid);
-            (*(task.fun))(task.arg);
+             (*(task.fun))(task.arg);
 
             if (pthread_mutex_lock(&(pool->lock)) != 0) {
                 printf("ERRORE FATALE lock\n");
@@ -73,6 +74,7 @@ static void *workerpool_thread(void *threadpool) {
             printf("ERRORE FATALE unlock\n");
             return NULL;
         }
+
             fprintf(stderr, "thread %d exiting\n", myid);
             return NULL;
 }
@@ -126,7 +128,7 @@ threadpool_t *createThreadPool(int numthreads, int pending_size) {
     }
     for(int i = 0; i < numthreads; i++) {
         if(pthread_create(&(pool->threads[i]), NULL,
-                          workerpool_thread, (void*)pool) != 0) {
+                          (void *(*)(void *)) workerpool_thread, (void*)pool) != 0) {
 	    /* errore fatale, libero tutto forzando l'uscita dei threads */
             destroyThreadPool(pool, 1);
 	    errno = EFAULT;

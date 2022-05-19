@@ -21,10 +21,10 @@
 int updatemax(fd_set set, int fdmax);
 
 //Funzione che legge un'intera linea del file di configurazione
-int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
+int read_line(char *line, char* NOME_SOCKET, char* LOGFILE, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
 
 //Funzione che legge tutto il file di configurazione e inizializza i parametri
-int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
+int read_config_file(char* config_filename, char* NOME_SOCKET, char* LOGFILE, int* NUMERO_WORKERS, int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO);
 
 //Gestore segnali
 bool NO_MORE_CONNECTIONS = false;
@@ -36,6 +36,11 @@ static int signal_pipe[2]; //pipe per segnali
 //      MAIN START
 /***************************/
 int main(int argc, char* argv[]) {
+
+    //Log file
+    char LOGFILE[MAX_PATH] = "";
+    bool logfile_open = false;
+    pthread_mutex_t logfile_mutex;
 
     printf("Server avviato\n");
     if(argc < 3){
@@ -65,6 +70,7 @@ int main(int argc, char* argv[]) {
     sigaddset(&sigset, SIGINT);
     sigaddset(&sigset, SIGHUP);
     sigaddset(&sigset, SIGQUIT);
+    signal(SIGPIPE, SIG_IGN);
     sig_action.sa_mask = sigset;
     pthread_t signal_thread = 0;
     bool signal_thread_activated = false;
@@ -75,6 +81,14 @@ int main(int argc, char* argv[]) {
     }
     if (pthread_sigmask(SIG_BLOCK, &sigset, NULL) != 0) goto cleanup;
 
+    if(MAX_STRLEN < 20){
+        // valore utilizzato per trasformare l'ID del client in stringa
+        // considero il massimo numero positivo raggiungibile dalla macchina
+        // che contiene 20 cifre (unsigned long long) e quindi 20 caratteri
+        printf("Valore MAX_STRLEN in util.h troppo piccolo\n");
+        goto cleanup;
+    }
+
     //LETTURA FILE CONFIGURAZIONE
      int opt;
      while( ( opt = getopt(argc, argv, ":f:") ) != -1 ){
@@ -82,6 +96,7 @@ int main(int argc, char* argv[]) {
              case 'f':
                 if ( read_config_file(optarg,
                                       NOME_SOCKET,
+                                      LOGFILE,
                                       &NUMERO_WORKERS,
                                       &MAX_FILE,
                                       &MAX_MEMORIA,
@@ -100,6 +115,16 @@ int main(int argc, char* argv[]) {
 
      //INIZIALIZZAZIONE DOPO LETTURA FILE
 
+     //FILE DI LOG
+     FILE *logfile = fopen(LOGFILE, "w");
+     if(!logfile){
+         printf("Errore nella creazione nel file di log\n");
+         goto cleanup;
+     }else{
+         printf("- File di log inizializzato\n");
+         logfile_open = true;
+         pthread_mutex_init(&logfile_mutex, NULL);
+     }
      //PIPE: pfd[0] per lettura, pfd[1] scrittura
      if(pipe(pfd) == -1){
          printf("Errore nella creazione della pipe\n");
@@ -247,6 +272,8 @@ int main(int argc, char* argv[]) {
                req->client_fd = connfd;
                req->storage = myStorage;
                req->pipe_write = pfd[1];
+               req->logfile = logfile;
+               req->logfile_mutex = &logfile_mutex;
 
                //Se la richiesta non è una shutdown allora è una richiesta da gestire nel pool
                if (addToThreadPool(workers,(void *) request_handler_function,req) == -1) {
@@ -266,7 +293,8 @@ int main(int argc, char* argv[]) {
 
      //FASE FINALE DI CLEANUP
      cleanup:
-     if(workers)
+    if(errno != 0) perror("Info sull'errore");
+    if(workers)
         destroyThreadPool(workers, 0);
      if(myStorage)
         storage_destroy(myStorage);
@@ -278,6 +306,10 @@ int main(int argc, char* argv[]) {
 
      //EXIT
      exit:
+    if(logfile_open) {
+        fclose(logfile);
+        pthread_mutex_destroy(&logfile_mutex);
+    }
      if(!strcmp(NOME_SOCKET,"")) unlink(NOME_SOCKET);
 
      return 0;
@@ -344,7 +376,7 @@ static void signals_checker(void* arg){
  *
  * @returns 0 se non ci sono errori, -1 in caso di errore
  */
-int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
+int read_line(char *line, char* NOME_SOCKET, char* LOGFILE, int* NUMERO_WORKERS,
               int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO) {
 
     char *ptr;
@@ -363,8 +395,26 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
             printf("Socket name troppo lungo\n");
             return -1;
         }
-        token[strlen(token)-1] = '\0';
+         if(token[strlen(token)-1] != 't')
+             token[strlen(token)-1] = '\0';
         strcpy(NOME_SOCKET, token);
+        return 0;
+    }
+
+    //Imposta il nome file di log
+    if (strcmp(token, "LOG_FILE") == 0) {
+        token = strtok_r(NULL, "=", &tmpstr);
+        if (!token || *token == '\n') {
+            printf("Log file mancante\n");
+            return -1;
+        }
+        if (strlen(token) >= MAX_PATH) {
+            printf("Nome log file troppo lungo\n");
+            return -1;
+        }
+        if(token[strlen(token)-1] != 't')
+            token[strlen(token)-1] = '\0';
+        strcpy(LOGFILE, token);
         return 0;
     }
 
@@ -457,7 +507,7 @@ int read_line(char *line, char* NOME_SOCKET, int* NUMERO_WORKERS,
  *
  * @returns 0 se non ci sono errori, -1 in caso di errore
  */
-int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKERS,
+int read_config_file(char* config_filename, char* NOME_SOCKET, char* LOGFILE, int* NUMERO_WORKERS,
                      int* LIMITE_FILE, int* LIMITE_MB, int* METODO_RIMPIAZZAMENTO){
     FILE *ptr;
     char* line;
@@ -471,7 +521,7 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, int* NUMERO_WORKE
     }
 
     while(fgets(line, MAX_LINE, ptr ) != NULL ){
-        if(read_line(line, NOME_SOCKET, NUMERO_WORKERS, LIMITE_FILE, LIMITE_MB, METODO_RIMPIAZZAMENTO) == -1) {
+        if(read_line(line, NOME_SOCKET, LOGFILE, NUMERO_WORKERS, LIMITE_FILE, LIMITE_MB, METODO_RIMPIAZZAMENTO) == -1) {
             free(line);
             fclose(ptr);
             return -1;
