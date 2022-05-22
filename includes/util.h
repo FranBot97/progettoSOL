@@ -20,6 +20,7 @@
 #define MAX_STRLEN 128 //Lunghezza generica array di caratteri
 #define RETRY_CONN_MSEC 2000 //Tempo in msec tra ogni tentativo di riconnessione
 #define TIMEOUT_CONN_SEC 10 //Tempo di timeout in secondi, dopo TIMEOUT_CONN_SEC non si ritenta più la connessione
+#define ERROR_STRLEN MAX_PATH*2
 #define FREAD_SIZE 64 //chunk di bytes da leggere nella fread
 #define TRY_LOCK_TIMEOUT 5 //Tempo di timeout in secondi per l'attesa di una unlock su un file
 #define TRY_LOCK_LIMIT 3 //Tentativi per ripetere la richiesta di lock in caso di fallimento
@@ -122,5 +123,9 @@ static inline int ulong_key_compare( void *key1, void *key2  ) {
     return ( *(unsigned long*)key1 == *(unsigned long*)key2 );
 }
 
+/* Macro usata per stampa nell'API */
+#define PRINT_INFO(condition, ...) \
+	if (condition) { fprintf(stdout, __VA_ARGS__); \
+    fflush(stdout);}
 
 #endif

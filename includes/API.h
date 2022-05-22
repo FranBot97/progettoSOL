@@ -8,8 +8,6 @@
 #include <list.h>
 #include <util.h>
 
-bool print_info = false; //visibile al client
-
 int openConnection(const char* sockname, int msec, const struct timespec abstime);
 
 int closeConnection(const char* sockname);
