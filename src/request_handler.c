@@ -20,6 +20,7 @@ void request_handler_function(request_t* request) {
     fflush(stdout);
 
     int result = -1;
+    errno = 0;
     /***** Identifico la richiesta e effettuo le operazioni corrispondenti ******/
     switch(request->opcode){
         case OPEN:
@@ -71,7 +72,7 @@ void request_handler_function(request_t* request) {
 
     //Se l'operazione è una LOCK fallita NON rimetto il client tra i descrittori in attesa
     //ma lo aggiungo ad un array di client che attendono di fare una lock
-    if(request->opcode == LOCK && result == FAILURE && errno_copy == EACCES){
+    if(request->opcode == LOCK && result == FAILURE && errno_copy == EPERM){
         if (server_addClientWaiting(request) != 0) exit(FATAL);
         goto cleanup;
     }
@@ -128,8 +129,10 @@ int server_openFile(request_t* request) {
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_openFile(request->storage, filename, flags, client_fd);
 
-    cleanup:
-    if(flags & O_LOCK) strcpy(OP, "OPENLOCK");
+    cleanup: //TODO
+    if(flags == (O_CREATE | O_LOCK)) strcpy(OP, "OPEN_CREATE_LOCK");
+    else if(flags == O_LOCK) strcpy(OP, "OPEN_LOCK");
+    else if(flags == O_CREATE) strcpy(OP, "OPEN_CREATE");
     else strcpy(OP, "OPEN");
     write_logfile(request, OP, client_fd, 0, 0, 0, filename_copy, (result == 0 ? "OK" : "ERR"));
 
@@ -150,7 +153,7 @@ int server_writeFile(request_t* request){
     unsigned long sent_bytes = 0; //file di log
 
     //Leggo dal client nell'ordine: lunghezza nome file, nome file, dimensione del file in bytes, contenuto
-    int filename_len; char* filename = NULL; off_t file_size; void* file_data = NULL;
+    int filename_len; char* filename = NULL; off_t file_size = 0; void* file_data = NULL;
     if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
     filename = (char*)malloc(filename_len*sizeof(char)+1);
     if(!filename) return FATAL;
@@ -193,8 +196,8 @@ int server_writeFile(request_t* request){
             if( writen(request->client_fd, exp_file->content, exp_file_size) <= 0) goto cleanup;
 
             //Scrivo nel file di log
-            write_logfile(request, "VICTIM", client_fd, 0, 0, exp_file_size,
-                          filename,"OK");
+            write_logfile(request, "VICTIM", client_fd, exp_file_size, 0, exp_file_size,
+                          exp_file->filename,"OK");
 
             sent_bytes+=exp_file_size;
             file_destroy(exp_file);
@@ -210,7 +213,7 @@ int server_writeFile(request_t* request){
 
     cleanup:
     //Scrivo nel file di log
-    write_logfile(request, "WRITE", client_fd, 0, 0, sent_bytes,
+    write_logfile(request, "WRITE", client_fd, 0, file_size, sent_bytes,
                   filename,(result == 0 ? "OK" : "ERR"));
     if(filename)
         free(filename);
@@ -224,6 +227,7 @@ int server_appendToFile(request_t* request){
     int client_fd = (int)request->client_fd;
     int result = -1;
     unsigned long sent_bytes = 0;
+    size_t exp_file_size = 0;
 
     //Leggo dal client nell'ordine: lunghezza nome file, nome file, dimensione del contenuto in bytes, contenuto
     int filename_len; char* filename = NULL; size_t size; void* data = NULL;
@@ -252,11 +256,11 @@ int server_appendToFile(request_t* request){
     if(result != 0) goto  cleanup;
 
     //Controllo se ci sono file da inviare
-    size_t exp_file_size;
     if(expelled_files != NULL){
         while(expelled_files->num_elem > 0){
+            file_t* exp_file = NULL;
             elem_t* elem = list_remove_head(expelled_files);
-            file_t* exp_file = elem->content;
+            exp_file = elem->content;
             exp_file_size = exp_file->size;
             size_t exp_file_name_len = strlen(exp_file->filename);
             //Invio la dimensione del file
@@ -266,8 +270,8 @@ int server_appendToFile(request_t* request){
             if( writen(request->client_fd, exp_file->filename, exp_file_name_len) <= 0) goto cleanup;
             if( writen(request->client_fd, exp_file->content, exp_file_size) <= 0) goto cleanup;
             //Scrivo nel file di log
-            write_logfile(request, "VICTIM", client_fd, 0, 0, exp_file_size,
-                          filename,"OK");
+            write_logfile(request, "VICTIM", client_fd, exp_file_size, 0, exp_file_size,
+                          exp_file->filename,"OK");
             sent_bytes+=exp_file_size;
             file_destroy(exp_file);
             //if(elem->content) free(elem->content);
@@ -282,7 +286,7 @@ int server_appendToFile(request_t* request){
 
     cleanup:
     //Scrivo nel file di log
-    write_logfile(request, "WRITE", client_fd, 0, 0, sent_bytes,
+    write_logfile(request, "WRITE_APPEND", client_fd, 0, (result == 0 ? size : 0), sent_bytes,
                   filename,(result == 0 ? "OK" : "ERR"));
     if(filename)
         free(filename);
@@ -310,10 +314,12 @@ int server_readFile(request_t* request){
 
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_readFile(request->storage, filename, client_fd, &file_content);
+    int errno_copy = errno;
 
-    //Se result <= 0 invio l'errore al client e esco
+    //Se result <= 0 invio gli errori al client e esco
     if(result <= 0){
         if (writen(client_fd, &result, sizeof(long long)) <= 0) goto cleanup;
+        if (writen(client_fd, &errno_copy, sizeof(int)) <= 0) goto cleanup;
         goto cleanup;
     }
 
@@ -325,7 +331,7 @@ int server_readFile(request_t* request){
 
     cleanup:
     //Scrivo nel file di log
-    write_logfile(request, "READ", client_fd, 0, 0, result,
+    write_logfile(request, "READ", client_fd, 0, 0, (result > 0 ? result : 0),
                   filename,(result > 0 ? "OK" : "ERR"));
     if(filename) free(filename);
     if(file_content) free(file_content);
@@ -515,7 +521,7 @@ int server_removeFile(request_t* request){
     result = storage_removeFile(request->storage, filename, client_fd, &deleted_bytes);
 
     //Scrivo nel file di log
-    write_logfile(request, "REMOVE", client_fd, deleted_bytes, 0, 0,
+    write_logfile(request, "REMOVE", client_fd, (result == 0 ? deleted_bytes : 0), 0, 0,
                   filename,(result == 0 ? "OK" : "ERR"));
 
     if(result == 0) {
@@ -545,8 +551,9 @@ int write_logfile(request_t* request, const char* OP, int IDCLIENT, unsigned int
     pthread_mutex_t* mutex = request->logfile_mutex;
 
     if(pthread_mutex_lock(mutex) != 0) return FATAL;
-    if (fprintf(logfile, "THREAD=%lu,OP=%s,IDCLIENT=%d,DELETED_BYTES=%u,ADDED_BYTES=%u,SENT_BYTES=%u,OBJECT_FILE=%s,OUTCOME=%s\n",
+    if (fprintf(logfile, "/THREAD/=%lu /OP/=%s /IDCLIENT/=%d /DELETED_BYTES/=%u /ADDED_BYTES/=%u /SENT_BYTES/=%u /OBJECT_FILE/=%s /OUTCOME/=%s\n",
             pthread_self(),OP, IDCLIENT, DELETED_BYTES, ADDED_BYTES, SENT_BYTES, OBJECT_FILE, OUTCOME) < 0) return FATAL;
+    fflush(logfile);
     if(pthread_mutex_unlock(mutex) != 0) return FATAL;
 
     return SUCCESS;

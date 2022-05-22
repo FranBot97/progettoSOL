@@ -293,6 +293,7 @@ elem_t* list_remove_elem(list_t* list, void* value, int (*compare_function)(void
             }
             return return_elem;
         }
+        elem = elem->next;
     }
     return NULL;
 }

@@ -17,6 +17,10 @@
 #include <request_handler.h>
 #include <util.h>
 
+//Main print log files
+int main_write_logfile(FILE* logfile, pthread_mutex_t* mutex, const char* OP, int IDCLIENT, unsigned int DELETED_BYTES, unsigned int ADDED_BYTES,
+unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME);
+
 //Funzione che calcola max fd
 int updatemax(fd_set set, int fdmax);
 
@@ -220,6 +224,8 @@ int main(int argc, char* argv[]) {
                    FD_SET(connfd, &set);
                    if (connfd > fdmax)
                        fdmax = (int)connfd;
+                   if (main_write_logfile(logfile, &logfile_mutex, "CONNECT", (int)connfd, 0, 0, 0, 0, "OK") == FATAL)
+                       exit(EXIT_FAILURE);
                    continue;
                }
 
@@ -253,6 +259,8 @@ int main(int argc, char* argv[]) {
                    connected_clients--;
                    FD_CLR(connfd, &set);
                    close((int)connfd);
+                   if (main_write_logfile(logfile, &logfile_mutex, "DISCONNECT", (int)connfd, 0, 0, 0, 0, "OK") == FATAL)
+                       exit(EXIT_FAILURE);
                    continue;
                }
                //Se è una SHUTDOWN del server
@@ -295,14 +303,13 @@ int main(int argc, char* argv[]) {
      cleanup:
     if(errno != 0) perror("Info sull'errore");
     if(workers)
-        destroyThreadPool(workers, 0);
+        destroyThreadPool(workers, 1);
      if(myStorage)
         storage_destroy(myStorage);
      if(socket_fd != -1)
         close(socket_fd);
      if(signal_thread_activated)
-         pthread_kill(signal_thread, SIGKILL);
-     pthread_join(signal_thread, NULL);
+        pthread_join(signal_thread, NULL);
 
      //EXIT
      exit:
@@ -333,33 +340,32 @@ static void signals_checker(void* arg){
     printf(" !   Segnali abilitati   !\n");
     sigset_t* sigset = (sigset_t*) arg;
     int signal;
-    if( sigwait(sigset, &signal) != 0) exit(EXIT_FAILURE);
-    //printf("Segnale\n");
-        switch (signal)
-        {
-            case SIGINT:
-            case SIGQUIT:
-                NO_MORE_CONNECTIONS = true;
-                NO_MORE_REQUESTS = true;
-                printf("Terminazione immediata\n");
-                break;
+   if (sigwait(sigset, &signal) != 0) exit(EXIT_FAILURE);
+       //printf("Segnale\n");
+   switch (signal) {
+       case SIGINT:
+       case SIGQUIT:
+           NO_MORE_CONNECTIONS = true;
+           NO_MORE_REQUESTS = true;
+           printf("Terminazione immediata\n");
+           break;
 
-            case SIGHUP:
-                NO_MORE_CONNECTIONS = true;
-                NO_MORE_REQUESTS = false;
-                printf("Terminazione in corso ... in attesa che tutti i client si disconnettano\n");
-                break;
+       case SIGHUP:
+           NO_MORE_CONNECTIONS = true;
+           NO_MORE_REQUESTS = false;
+           printf("Terminazione in corso ... in attesa che tutti i client si disconnettano\n");
+           break;
 
-            case SIGPIPE:
-            default:
-                break;
+       case SIGPIPE:
+       default:
+           break;
 
-        }
-        char msg[10] = "wake up!";
-    if(write(signal_pipe[1], msg, sizeof(msg)) <= 0) {
-        perror("Errore scrittura pipe\n");
-        exit(FATAL);
-    }
+   }
+   char msg[10] = "wake up!";
+   if (write(signal_pipe[1], msg, sizeof(msg)) <= 0) {
+       perror("Errore scrittura pipe\n");
+       exit(FATAL);
+   }
 }
 
 
@@ -530,4 +536,18 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, char* LOGFILE, in
     free(line);
     fclose(ptr);
     return 0;
+}
+
+int main_write_logfile(FILE* logfile, pthread_mutex_t* mutex, const char* OP, int IDCLIENT, unsigned int DELETED_BYTES, unsigned int ADDED_BYTES,
+                  unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME){
+
+
+    if(pthread_mutex_lock(mutex) != 0) return FATAL;
+    if (fprintf(logfile, "/THREAD/=%lu /OP/=%s /IDCLIENT/=%d /DELETED_BYTES/=%u /ADDED_BYTES/=%u /SENT_BYTES/=%u /OBJECT_FILE/=%s /OUTCOME/=%s\n",
+                pthread_self(),OP, IDCLIENT, DELETED_BYTES, ADDED_BYTES, SENT_BYTES, OBJECT_FILE, OUTCOME) < 0) return FATAL;
+    fflush(logfile);
+    if(pthread_mutex_unlock(mutex) != 0) return FATAL;
+
+    return SUCCESS;
+
 }

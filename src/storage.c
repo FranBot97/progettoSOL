@@ -119,7 +119,7 @@ int storage_openFile(storage_t* storage, char* filename, int flags, int client){
 
     if(!storage || !filename ){
         errno = EINVAL;
-        return -1;
+        return FAILURE;
     }
 
     if(flags & O_CREATE){
@@ -388,7 +388,9 @@ int storage_appendToFile(storage_t* storage, char* filename, size_t size, void* 
 
             //Altrimenti significa che non c'è abbastanza spazio e devo liberare dei file
             //prendo il nome del primo file da eliminare (FIFO)
-            elem_t *elem = list_remove_head(storage->filenames_queue);
+            //Vado a rimuovere dalla lista il primo elemento diverso dal file che devo scrivere
+            elem_t *elem = list_remove_elem(storage->filenames_queue, toAppend->filename,(int (*)(void *, void *))(string_compare));
+            //elem_t *elem = list_remove_head(storage->filenames_queue);
             if(elem == NULL) //Se sono arrivato qua e non ho file da liberare significa che c'è un errore di inconsistenza dello storage
                 return FATAL;
             char *exp_file_name = elem->content;
@@ -608,7 +610,7 @@ int storage_lockFile(storage_t* storage, char* filename, int client){
     snprintf(client_str, MAX_STRLEN, "%d", client);
     if(list_get_elem(toLock->who_opened, client_str, (void*)strcmp) == NULL){
         if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
-        errno = EPERM;
+        errno = EACCES;
         return FAILURE;
     }
 
@@ -623,7 +625,7 @@ int storage_lockFile(storage_t* storage, char* filename, int client){
     //Non posso completare la richiesta adesso, libero il thread da questo task
     if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
 
-    errno = EACCES;
+    errno = EPERM;
     return FAILURE;
 }
 
@@ -654,7 +656,7 @@ int storage_unlockFile(storage_t* storage, const char* filename, int client){
     snprintf(client_str, MAX_STRLEN, "%d", client);
     if(list_get_elem(toLock->who_opened, client_str, (void*)strcmp) == NULL){
         if(rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
-        errno = EPERM;
+        errno = EACCES;
         return FAILURE;
     }
 
@@ -675,7 +677,7 @@ int storage_unlockFile(storage_t* storage, const char* filename, int client){
     //Un altro client è il locker
     if(toLock->client_locker != -1) {
         if (rwlock_writerUnlock(toLock->mutex) != 0) return FATAL;
-        errno = EACCES;
+        errno = EPERM;
         return FAILURE;
     }
 

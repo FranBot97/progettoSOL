@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <stdio.h>
 
 struct rwlock
 {
@@ -115,6 +116,7 @@ int rwlock_writerLock(rwlock_t* lock)
     if (err != 0)
         return -1;
 
+    printf("WRITER LOCK PRESA\n");
     return 0;
 }
 
@@ -135,6 +137,7 @@ int rwlock_writerUnlock(rwlock_t* lock)
     if (err != 0)
         return -1;
 
+    printf("WRITER UNLOCK \n");
     return 0;
 }
 
