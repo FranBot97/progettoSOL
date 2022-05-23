@@ -273,12 +273,8 @@ int main(int argc, char* argv[]) {
                req->pipe_write = pfd[1];
                req->logfile = logfile;
                req->logfile_mutex = &logfile_mutex;
-
-               //Se la richiesta non è una shutdown allora è una richiesta da gestire nel pool
+               
                if (addToThreadPool(workers,(void *) request_handler_function,req) == -1) {
-                   //Se c'è un errore col threadpool comunico fallimento al client
-                   int error = FAILURE;
-                   writen(connfd, &error, sizeof(int));
                    continue;
                }
                //printf("Richiesta inviata al thread\n");
