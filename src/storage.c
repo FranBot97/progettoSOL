@@ -247,8 +247,9 @@ long long storage_readFile(storage_t* storage, char* filename, int client, void*
         *buf = malloc(toRead->size);
         if(!*buf) return FATAL;
         memcpy(*buf, toRead->content, toRead->size);
+        unsigned long size = toRead->size;
         if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        return toRead->size;
+        return size;
     }else{
         //il file appartiene ad un altro client, non si può leggere
         if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
