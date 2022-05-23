@@ -288,7 +288,7 @@ int main(int argc, char* argv[]) {
 
      cleanup:
     if(workers)
-        destroyThreadPool(workers, 1);
+        destroyThreadPool(workers, 0);
      if(myStorage)
         storage_destroy(myStorage);
      if(socket_fd != -1)
