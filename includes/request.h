@@ -1,13 +1,18 @@
-//
-// Created by linuxlite on 22/02/22.
-//
-
 #ifndef REQUEST_H
 #define REQUEST_H
 #include <pthread.h>
 #include <sys/select.h>
 #include <storage.h>
 
+/**  Struct che rappresenta una generica richiesta di un client.
+ *
+ *  @param opcode - codice identificativo del tipo di richiesta
+ *  @param client_fd - identificativo del client
+ *  @param storage - puntatore al File Storage su cui eseguire l'operazione
+ *  @param pipe_write - pipe per comunicare con il main thread
+ *  @param logfile - puntatore al file di log
+ *  @param logfile_mutex - mutex per accedere in mutua esclusione al file
+ **/
 typedef struct request{
     int opcode;
     long client_fd;
@@ -18,7 +23,7 @@ typedef struct request{
     pthread_mutex_t* logfile_mutex;
 } request_t;
 
-
+/* Operazioni possibili con i rispettivi codici */
 enum opcode_{
     OPEN = 1,
     WRITE = 2,
@@ -33,11 +38,13 @@ enum opcode_{
     SHUTDOWN = -1
 };
 
+/* Flags per l'operazione di openFile */
 enum flags_   {
     O_CREATE = 1 << 0,
     O_LOCK  = 1 << 1
 };
 
+/* Codici degli errori */
 enum errors_{
     SUCCESS = 0,
     FAILURE = -1,

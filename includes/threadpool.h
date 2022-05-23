@@ -1,13 +1,14 @@
 #ifndef THREADPOOL_H_
 #define THREADPOOL_H_
-
 #include <pthread.h>
-
+// © Threadpool file utilizzato nelle esercitazioni
 /**
  * @file threadpool.h
  * @brief Interfaccia per il ThreadPool
  */
- 
+
+
+
 /**
  *  @struct threafun_t
  *  @brief generico task che un thread del threadpool deve eseguire

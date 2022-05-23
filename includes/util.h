@@ -15,17 +15,11 @@
 #define MAX_ARGLEN 1024 //Lunghezza massima argv
 #define MAX_CONN 20 //Numero massimo di connessioni
 #define MAX_PATH MAX_FILENAME+MAX_ARGLEN //Massimo percorso file
-#define SOCKET_LEN 108
 #define MAX_LINE 128 //Massima lunghezza di una riga di file
 #define MAX_STRLEN 128 //Lunghezza generica array di caratteri
 #define RETRY_CONN_MSEC 2000 //Tempo in msec tra ogni tentativo di riconnessione
 #define TIMEOUT_CONN_SEC 10 //Tempo di timeout in secondi, dopo TIMEOUT_CONN_SEC non si ritenta più la connessione
-#define ERROR_STRLEN MAX_PATH*2
-#define FREAD_SIZE 64 //chunk di bytes da leggere nella fread
-#define TRY_LOCK_TIMEOUT 5 //Tempo di timeout in secondi per l'attesa di una unlock su un file
-#define TRY_LOCK_LIMIT 3 //Tentativi per ripetere la richiesta di lock in caso di fallimento
-#define STANDARD_HASHTABLE_SIZE 25 //Dimensione standard per numero righe hashtable
-
+#define ERROR_STRLEN MAX_PATH*2 //Lunghezza stringa per eventuali args di errori
 
 /** Evita letture parziali
  *
@@ -89,7 +83,11 @@ static inline int isNumber(const char* s, long* n) {
     return 1;   // non e' un numero
 }
 
-
+/**
+ * @brief Preleva il nome del file dal percorso passato.
+ * @param pathname - percorso del file
+ * @param result - stringa dove viene memorizzato il risultato
+ */
 static inline void parseFilename(char* pathname, char* result){
     char* filename;
     char name[MAX_FILENAME];
@@ -102,6 +100,8 @@ static inline void parseFilename(char* pathname, char* result){
     strcpy(result, name);
 }
 
+
+/** Funzione extra per tabella hash **/
 static inline unsigned int fnv_hash_function( void *key, int len ) {
     unsigned char *p = (unsigned char*)key;
     unsigned int h = 2166136261u;
