@@ -1,6 +1,3 @@
-//
-// Created by linuxlite on 22/02/22.
-//
 #include <unistd.h>
 #include <request_handler.h>
 #include <stdlib.h>
@@ -16,30 +13,33 @@ void request_handler_function(request_t* request) {
         return;
 
     //Se la richiesta è valida qui la gestisco
-    printf("Richiesta %d da parte del client %ld \n", request->opcode, request->client_fd);
-    fflush(stdout);
-
     int result = -1;
+    int errno_copy = 0;
     errno = 0;
     /***** Identifico la richiesta e effettuo le operazioni corrispondenti ******/
+    //printf("\nIn esecuzione richiesta %d dal client %ld\n", request->opcode, request->client_fd);
     switch(request->opcode){
         case OPEN:
             result = server_openFile(request);
             break;
         case WRITE:
             result = server_writeFile(request);
+            errno_copy = errno;
             goto check_fatal;
             break;
         case APPEND:
             result = server_appendToFile(request);
+            errno_copy = errno;
             goto check_fatal;
             break;
         case READ:
             result = server_readFile(request);
+            errno_copy = errno;
             goto check_fatal;
             break;
         case READN:
             result = server_readNFiles(request);
+            errno_copy = errno;
             goto check_fatal;
             break;
         case LOCK:
@@ -60,18 +60,21 @@ void request_handler_function(request_t* request) {
     }
 
     //Invio codice del risultato e errno al client
-    int errno_copy = errno;
+    errno_copy = errno;
     writen(request->client_fd, &result, sizeof(int));
     writen(request->client_fd, &errno_copy, sizeof(int));
+
     //Gli errori che lascerebbero lo storage inconsistente (ad es. fallimento di malloc, lock/unlock mutex)
     //vengono marcati come fatali e non permettono al server di continuare
     check_fatal:
     if(result == FATAL){
+        fatal_logfile(request, errno_copy);
         exit(FATAL);
     }
 
-    //Se l'operazione è una LOCK fallita NON rimetto il client tra i descrittori in attesa
-    //ma lo aggiungo ad un array di client che attendono di fare una lock
+    // Se l'operazione è una LOCK fallita a causa di un altro client che detiene la lock
+    // NON rimetto il client tra i descrittori in attesa
+    // ma lo aggiungo ad un array di client che attendono di fare una lock e esco
     if(request->opcode == LOCK && result == FAILURE && errno_copy == EPERM){
         if (server_addClientWaiting(request) != 0) exit(FATAL);
         goto cleanup;
@@ -95,7 +98,6 @@ void request_handler_function(request_t* request) {
         }
     }
 
-
     cleanup:
     free(request);
     request = NULL;
@@ -107,9 +109,10 @@ int server_openFile(request_t* request) {
     int client_fd = (int)request->client_fd;
     size_t filename_len = 0;
     char* filename = NULL;
-    char filename_copy[MAX_FILENAME];
+    char filename_copy[MAX_FILENAME] = "";
     int flags;
     int result = -1;
+    int errno_copy = 0;
 
     if (readn(client_fd, &flags, sizeof(int)) <= 0) goto cleanup;
     if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
@@ -122,14 +125,17 @@ int server_openFile(request_t* request) {
         goto cleanup;
     }
     filename = (char*)malloc(filename_len*sizeof(char)+1);
-    if(filename == NULL) goto cleanup;
+    if(filename == NULL)  goto cleanup;
     if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
     filename[filename_len] = '\0';
     strcpy(filename_copy, filename);
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_openFile(request->storage, filename, flags, client_fd);
+    if(result == FATAL)
+        return FATAL;
+    errno_copy = errno;
 
-    cleanup: //TODO
+    cleanup:
     if(flags == (O_CREATE | O_LOCK)) strcpy(OP, "OPEN_CREATE_LOCK");
     else if(flags == O_LOCK) strcpy(OP, "OPEN_LOCK");
     else if(flags == O_CREATE) strcpy(OP, "OPEN_CREATE");
@@ -141,6 +147,7 @@ int server_openFile(request_t* request) {
     else{
         if(filename)
             free(filename);
+        errno = errno_copy;
         return result;
     }
 
@@ -156,6 +163,7 @@ int server_writeFile(request_t* request){
     int filename_len; char* filename = NULL; off_t file_size = 0; void* file_data = NULL;
     if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
     filename = (char*)malloc(filename_len*sizeof(char)+1);
+    memset(filename, '\0', filename_len*sizeof(char));
     if(!filename) return FATAL;
     filename[filename_len] = '\0';
     if (readn(client_fd, filename, filename_len) <= 0) goto cleanup;
@@ -166,7 +174,9 @@ int server_writeFile(request_t* request){
 
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     list_t* expelled_files = NULL;
-    result = storage_writeFile(request->storage, filename, file_size, file_data, client_fd, &expelled_files);
+    result = storage_writeFile(request->storage, filename, file_size, file_data, client_fd, &expelled_files); //sets errno
+    if(result == FATAL)
+        return FATAL;
 
     //Comunico al client se la scrittura è andata a buon fine
     int errno_copy = errno;
@@ -201,7 +211,6 @@ int server_writeFile(request_t* request){
 
             sent_bytes+=exp_file_size;
             file_destroy(exp_file);
-            //if(elem->content) free(elem->content);
             if(elem) free(elem);
         }
         list_destroy(expelled_files, NULL);
@@ -233,6 +242,7 @@ int server_appendToFile(request_t* request){
     int filename_len; char* filename = NULL; size_t size; void* data = NULL;
     if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
     filename = (char*)malloc(filename_len*sizeof(char)+1);
+    memset(filename, '\0', filename_len*sizeof(char));
     if(!filename) return FATAL;
     filename[filename_len] = '\0';
     if (readn(client_fd, filename, filename_len) <= 0) goto cleanup;
@@ -244,6 +254,8 @@ int server_appendToFile(request_t* request){
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     list_t* expelled_files = NULL;
     result = storage_appendToFile(request->storage, filename, size, data, client_fd, &expelled_files);
+    if(result == FATAL)
+        return FATAL;
 
     //Comunico al client se la scrittura è andata a buon fine
     int errno_copy = errno;
@@ -308,23 +320,29 @@ int server_readFile(request_t* request){
     char* filename = NULL;
     if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
     filename = (char*)malloc(filename_len*sizeof(char)+1);
+    memset(filename, '\0', filename_len*sizeof(char));
     if(!filename) return FATAL;
     filename[filename_len] = '\0';
     if (readn(client_fd, filename, filename_len) <= 0) goto cleanup;
 
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_readFile(request->storage, filename, client_fd, &file_content);
+    if(result == FATAL)
+        return FATAL;
     int errno_copy = errno;
-
-    //Se result <= 0 invio gli errori al client e esco
+    //Invio responso
     if(result <= 0){
-        if (writen(client_fd, &result, sizeof(long long)) <= 0) goto cleanup;
+        int error = 0;
+        if (writen(client_fd, &error, sizeof(int)) <= 0) goto cleanup;
         if (writen(client_fd, &errno_copy, sizeof(int)) <= 0) goto cleanup;
         goto cleanup;
+    }else{
+        int ok = 1;
+        if (writen(client_fd, &ok, sizeof(int)) <= 0) goto cleanup;
     }
 
     //Altrimenti result rappresenta il numero di bytes letti
-    file_size = result;
+    file_size = (size_t)result;
     // Invio il contenuto del file al client, nell'ordine: dimensione e contenuto
     if (writen(client_fd, &file_size, sizeof(size_t)) <= 0) goto cleanup;
     if (writen(client_fd, file_content, file_size) <= 0) goto cleanup;
@@ -348,6 +366,8 @@ int server_readNFiles(request_t* request){
     if(readn(client, &N, sizeof(int)) <= 0) goto cleanup;
     //Chiamo la rispettiva funzione dello storage che inserirà nella lista i file
     result = storage_readNFiles(request->storage, client, N, &files_to_send);
+    if(result == FATAL)
+        return FATAL;
     int errno_copy = errno;
     //Se è andata a buon fine result contiene il numero di file letti
     //e la lista files_to_send contiene i file
@@ -375,7 +395,7 @@ int server_readNFiles(request_t* request){
     cleanup:
     //Scrivo nel file di log se c'è stato un errore
     if(result < 0) write_logfile(request, "READ_N", client, 0, 0, 0,
-                  0,"ERR");
+                                 0,"ERR");
     //Invio result e poi errno
     if (writen(request->client_fd, &result, sizeof(int)) <= 0) return FAILURE;
     if (writen(request->client_fd, &errno_copy, sizeof(int)) <= 0) return FAILURE;
@@ -390,22 +410,27 @@ int server_closeFile(request_t* request){
     size_t filename_len = 0;
     char* filename = NULL;
     int result = -1;
+    int errno_copy = 0;
 
-    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0){ errno_copy = errno; goto cleanup;}
     if (filename_len > MAX_FILENAME){
-        errno = ENAMETOOLONG;
+        errno_copy = ENAMETOOLONG;
         goto cleanup;
     }
     if(filename_len <= 0){
-        errno = EINVAL;
+        errno_copy = EINVAL;
         goto cleanup;
     }
     filename = (char*)malloc(filename_len*sizeof(char)+1);
+    memset(filename, '\0', filename_len);
     if(filename == NULL) return FATAL;
-    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) { errno_copy = errno; goto cleanup;}
     filename[filename_len] = '\0';
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_closeFile(request->storage, filename, client_fd);
+    if(result == FATAL)
+        return FATAL;
+    errno_copy = errno;
 
     cleanup:
     //Scrivo nel file di log
@@ -413,6 +438,7 @@ int server_closeFile(request_t* request){
                   filename,(result == 0 ? "OK" : "ERR"));
     if(filename)
         free(filename);
+    errno = errno_copy;
     return result;
 
 }
@@ -424,22 +450,26 @@ int server_lockFile(request_t* request){
     size_t filename_len = 0;
     char* filename = NULL;
     int result = -1;
+    int errno_copy = 0;
 
-    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) goto cleanup;
+    if (readn(client_fd, &filename_len, sizeof(size_t)) <= 0) { errno_copy = errno; goto cleanup;}
     if (filename_len > MAX_FILENAME){
-        errno = ENAMETOOLONG;
+        errno_copy = ENAMETOOLONG;
         goto cleanup;
     }
     if(filename_len <= 0){
-        errno = EINVAL;
+        errno_copy = EINVAL;
         goto cleanup;
     }
     filename = (char*)malloc(filename_len*sizeof(char)+1);
     if(filename == NULL) return FATAL;
-    if (readn(client_fd, (void*)filename, filename_len) <= 0) goto cleanup;
+    if (readn(client_fd, (void*)filename, filename_len) <= 0) { errno_copy = errno; goto cleanup;}
     filename[filename_len] = '\0';
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_lockFile(request->storage, filename, client_fd);
+    if(result == FATAL)
+        return FATAL;
+    errno_copy = errno;
 
     //Scrivo nel file di log
     write_logfile(request, "LOCK", client_fd, 0, 0, 0,
@@ -453,6 +483,7 @@ int server_lockFile(request_t* request){
     cleanup:
     if(filename)
         free(filename);
+    errno = errno_copy;
     return result;
 }
 
@@ -479,6 +510,8 @@ int server_unlockFile(request_t* request){
     filename[filename_len] = '\0';
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_unlockFile(request->storage, filename, client_fd);
+    if(result == FATAL)
+        return FATAL;
 
     //Scrivo nel file di log
     write_logfile(request, "UNLOCK", client_fd, 0, 0, 0,
@@ -511,7 +544,7 @@ int server_removeFile(request_t* request){
     }
     if(filename_len <= 0){
         errno = EINVAL;
-      goto cleanup;
+        goto cleanup;
     }
     filename = (char*)malloc(filename_len*sizeof(char)+1);
     if(filename == NULL) return FATAL;
@@ -519,6 +552,8 @@ int server_removeFile(request_t* request){
     filename[filename_len] = '\0';
     //Chiamo la rispettiva funzione della classe "storage" che effettuerà l'operazione
     result = storage_removeFile(request->storage, filename, client_fd, &deleted_bytes);
+    if(result == FATAL)
+        return FATAL;
 
     //Scrivo nel file di log
     write_logfile(request, "REMOVE", client_fd, (result == 0 ? deleted_bytes : 0), 0, 0,
@@ -536,6 +571,8 @@ int server_removeFile(request_t* request){
 
 }
 
+// Funzioni di supporto //
+
 int server_addClientWaiting(request_t* request){
     return storage_addClientWaiting(request->storage, (int)request->client_fd);
 }
@@ -545,17 +582,27 @@ int server_removeClientWaiting(request_t* request){
 }
 
 int write_logfile(request_t* request, const char* OP, int IDCLIENT, unsigned int DELETED_BYTES, unsigned int ADDED_BYTES,
-                   unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME){
+                  unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME){
 
     FILE* logfile = request->logfile;
     pthread_mutex_t* mutex = request->logfile_mutex;
 
     if(pthread_mutex_lock(mutex) != 0) return FATAL;
     if (fprintf(logfile, "/THREAD/=%lu /OP/=%s /IDCLIENT/=%d /DELETED_BYTES/=%u /ADDED_BYTES/=%u /SENT_BYTES/=%u /OBJECT_FILE/=%s /OUTCOME/=%s\n",
-            pthread_self(),OP, IDCLIENT, DELETED_BYTES, ADDED_BYTES, SENT_BYTES, OBJECT_FILE, OUTCOME) < 0) return FATAL;
+                pthread_self(),OP, IDCLIENT, DELETED_BYTES, ADDED_BYTES, SENT_BYTES, OBJECT_FILE, OUTCOME) < 0) return FATAL;
     fflush(logfile);
     if(pthread_mutex_unlock(mutex) != 0) return FATAL;
 
     return SUCCESS;
 
+}
+
+void fatal_logfile(request_t* request, int error){
+    FILE* logfile = request->logfile;
+    pthread_mutex_t* mutex = request->logfile_mutex;
+
+    if(pthread_mutex_lock(mutex) != 0) return;
+    fprintf(logfile, "/FATAL_ERROR/ OPCODE=%d CLIENT=%ld -> %s ",request->opcode, request->client_fd, strerror(error));
+    fflush(logfile);
+    if(pthread_mutex_unlock(mutex) != 0) return;
 }

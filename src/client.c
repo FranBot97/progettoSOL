@@ -22,10 +22,13 @@ unsigned int sec = 0;
 //Stampa comandi disponibili
 static void print_help();
 
+// Controlla che l'argomento sia un'operazione valita
 int checkArgument(const char* arg);
 
+// Controlla se il percorso della cartella è solo ".+"
 int isdot(const char dir[]);
 
+// Legge il contenuto del file in pathname e lo memorizza in un buffer
 int readFileContent(char* pathname, void** buf, size_t* size);
 
 //Analizza ricorsivamente la cartella nomedir ed esegue le operazioni relative a -w (writeFile)
@@ -36,7 +39,6 @@ int main(int argc, char* argv[]) {
     /*** VARIABILI CLIENT ******/
     long int msec = 0; //Tempo tra due richieste
     extern unsigned int sec;
-    bool time_set = false;
     extern bool print_info;
     struct timespec timeLimit;
     if( clock_gettime(CLOCK_REALTIME, &timeLimit) == -1)
@@ -47,7 +49,6 @@ int main(int argc, char* argv[]) {
     /*Inizio gestione input*/
 
     int opt; //identificativo opt
-    //bool h_opt = false; //ci dice se ho già usato il comando "-h"
     bool f_opt = false; //ci dice se ho già usato con successo il comando "-f"
     bool get_opt = false;
     bool R_has_args = true;
@@ -207,6 +208,7 @@ int main(int argc, char* argv[]) {
                             size_t size;
                             if (readFileContent(filepath, &buf, &size) == 0){
                                 appendToFile(filepath, buf, size, directory);
+                                free(buf);
                             }
                             closeFile(filepath);
                         }else{
@@ -225,11 +227,10 @@ int main(int argc, char* argv[]) {
                     free(directory);
                 break;
             }
+
             case 'D':
                 printf("\nNessuna operazione -w o -W valida associata al comando -D\n");
                 break;
-
-
 
 
             case 'r':
@@ -275,42 +276,47 @@ int main(int argc, char* argv[]) {
                 while (filepath != NULL) {
                     char filepath_copy[MAX_FILENAME];
                     strcpy(filepath_copy, filepath);
-                    openFile(filepath, 0);
                     //Legge file specificati
                     void *buf = NULL;
                     size_t size;
-                    if (readFile(filepath, &buf, &size) == 0 && set_dir) {
-                        char filename_parsed[MAX_FILENAME];
-                        parseFilename(filepath, filename_parsed);
-                        char complete_pathname[MAX_PATH*2];
-                        if(dirname[strlen(dirname)] != '/') strcat(dirname, "/");
-                        strcat(complete_pathname, dirname);
-                        strcat(complete_pathname, filename_parsed);
+                    if( openFile(filepath, 0) == 0) {
+                        if (readFile(filepath, &buf, &size) == 0 && set_dir) {
+                            char filename_parsed[MAX_FILENAME];
+                            parseFilename(filepath, filename_parsed);
+                            char complete_pathname[MAX_PATH * 2];
+                            if (dirname[strlen(dirname)] != '/') strcat(dirname, "/");
+                            strcat(complete_pathname, dirname);
+                            strcat(complete_pathname, filename_parsed);
 
-                        FILE *f = fopen(complete_pathname, "wb");
-                        if (!f) {
+                            FILE *f = fopen(complete_pathname, "wb");
+                            if (!f) {
+                                PRINT_INFO(print_info,
+                                           "\nreadFile: apertura del file %s nel dispositivo locale. Info sull'errore %s",
+                                           complete_pathname,
+                                           strerror(errno))
+                                goto cleanup;
+                            }
+                            if (fwrite(buf, size, 1, f) != 1) {
+                                PRINT_INFO(print_info,
+                                           "\nreadFile: scrittura del file %s nel dispositivo locale. Info sull'errore %s",
+                                           pathname,
+                                           strerror(errno))
+                                goto cleanup;
+                            }
                             PRINT_INFO(print_info,
-                                       "\nreadFile: apertura del file %s nel dispositivo locale. Info sull'errore %s",
-                                       complete_pathname,
-                                       strerror(errno))
-                           goto cleanup;
+                                       "\nClient: memorizzazione del file %s appena letto nella cartella %s",
+                                       filename_parsed, dirname);
+                            if (buf) {
+                                free(buf);
+                                buf = NULL;
+                            }
                         }
-                        if (fwrite(buf, size, 1, f) != 1) {
-                            PRINT_INFO(print_info, "\nreadFile: scrittura del file %s nel dispositivo locale. Info sull'errore %s", pathname,
-                                       strerror(errno))
-                           goto cleanup;
-                        }
-                        PRINT_INFO(print_info, "\nClient: memorizzazione del file %s appena letto nella cartella %s", filename_parsed, dirname);
-                        if(buf){
-                            free(buf);
-                            buf = NULL;
-                        }
+                        closeFile(filepath_copy);
                     }
                     if(buf){
                         free(buf);
                         buf = NULL;
                     }
-                    closeFile(filepath_copy);
                     filepath = strtok_r(NULL, ",", &rest);
                     if(sec > 0) sleep(sec);
                 }
@@ -429,7 +435,6 @@ int main(int argc, char* argv[]) {
                     msec = 0;
                 }else{
                     sec = msec/1000;
-                    time_set = true;
                 }
                 break;
 
@@ -529,11 +534,8 @@ int main(int argc, char* argv[]) {
 
     cleanup:
     closeConnection(sockname);
-    printf("\nTerminazione..\n");
     return 0;
 }
-
-
 
 
 
@@ -556,18 +558,6 @@ static void print_help(){
     -p: abilita le stampe sullo standard output per ogni operazione\n   ");
 
 }
-
-
-void intHandler() {
-    fflush(stdout);
-    if ( closeConnection(sockname) != 0){
-        printf("Cannot close connection\n");
-        perror("Close connection");
-    }
-    printf("\n Disconnesso, bye!\n");
-    fflush(stdout);
-    exit(1);
-}//TODO
 
 int checkArgument(const char* arg) {
 
@@ -603,14 +593,13 @@ int lsR(char* nomedir, char* store_dirname) {
     // controllo che il parametro sia una directory
     struct stat statbuf_;
     if (stat(nomedir,&statbuf_) != 0){
-        perror("Eseguendo la stat");
+        perror("\nFunzione lsR: eseguendo la stat");
         exit(EXIT_FAILURE);
     }
     DIR * dir;
 
     if ((dir=opendir(nomedir)) == NULL) {
-        perror("opendir");
-        fprintf(stderr, "Errore aprendo la directory %s\n", nomedir);
+        fprintf(stderr, "\nFunzione lsR: errore aprendo la directory %s\n", nomedir);
         return -1;
     } else {
         struct dirent *file;
@@ -621,7 +610,7 @@ int lsR(char* nomedir, char* store_dirname) {
             int len1 = (int)strlen(nomedir);
             int len2 = (int)strlen(file->d_name);
             if ((len1+len2+2)>MAX_PATH) {
-                fprintf(stderr, "ERRORE: MAX_PATH troppo piccolo\n");
+                fprintf(stderr, "Funzione lsR: MAX_PATH troppo piccolo\n");
                 exit(EXIT_FAILURE);
             }
             strncpy(filename,nomedir,      MAX_PATH-1);
@@ -629,8 +618,7 @@ int lsR(char* nomedir, char* store_dirname) {
             strncat(filename,file->d_name, MAX_PATH-1);
 
             if (stat(filename, &statbuf)==-1) {
-                perror("eseguendo la stat");
-                fprintf(stderr, "Errore nel file %s\n", filename);
+                fprintf(stderr, "\nFunzione lsR: errore nel file %s\n", filename);
                 return -1;
             }
             if(S_ISDIR(statbuf.st_mode)) {
@@ -691,7 +679,7 @@ int readFileContent(char* pathname, void** buf, size_t* size){
     }
     *buf = malloc(*size);
     if(!*buf){
-        perror("Errore allocazione memoria");
+        perror("\nreadFileContent: Errore allocazione memoria\n");
         exit(EXIT_FAILURE);
     }
     while (fread(*buf, 1, *size, file) > 0){

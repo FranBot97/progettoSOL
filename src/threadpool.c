@@ -61,7 +61,7 @@ static int *workerpool_thread(void *threadpool) {
             return NULL;
         }
              /*eseguo la funzione*/
-             printf("Thread %d in esecuzione..", myid);
+             //printf("Thread %d in esecuzione..", myid);
              (*(task.fun))(task.arg);
 
             if (pthread_mutex_lock(&(pool->lock)) != 0) {

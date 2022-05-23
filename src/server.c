@@ -9,8 +9,6 @@
 #include <stdbool.h>
 #include <signal.h>
 #include <limits.h>
-//#include <sys/stat.h>
-//#include <errno.h>
 
 #include <threadpool.h>
 #include <request.h>
@@ -62,7 +60,7 @@ int main(int argc, char* argv[]) {
     int NUMERO_WORKERS = 0;
     int MAX_FILE = 0;
     int MAX_MEMORIA = 0;
-    int REPLACE_MODE = 0; //0 = FIFO, 1 = LRU
+    int REPLACE_MODE = 0; //0 = FIFO
     int pfd[2]; //pipe
 
     //GESTIONE SEGNALI
@@ -158,7 +156,7 @@ int main(int argc, char* argv[]) {
      struct sockaddr_un serv_addr;
      memset(&serv_addr, 0, sizeof(serv_addr));
      serv_addr.sun_family = AF_UNIX;
-     strncpy(serv_addr.sun_path, NOME_SOCKET, SOCKET_LEN);
+     strncpy(serv_addr.sun_path, NOME_SOCKET, MAX_SOCKNAME);
      if ( bind(socket_fd, (struct sockaddr*)&serv_addr,sizeof(serv_addr)) == -1){
        perror("Bind fallita");
        goto cleanup;}
@@ -188,7 +186,7 @@ int main(int argc, char* argv[]) {
 
      int fdmax = (socket_fd > pfd[0] ? socket_fd : pfd[0]);
 
-     printf(" In attesa di nuove connessioni...  \n");
+     //printf("SERVER IN ESECUZIONE -  In attesa di nuove connessioni...  \n");
      while(true){
        rdset = set;
 
@@ -201,7 +199,6 @@ int main(int argc, char* argv[]) {
 
            //Se non accetto più nessuna richiesta esco
             if(NO_MORE_REQUESTS == true){
-                printf("Ok");
                 goto cleanup;
             }
             //Se non accetto più nuove connessioni e tutti i client attivi si sono disconnessi esco
@@ -219,7 +216,7 @@ int main(int argc, char* argv[]) {
                    if(connfd == -1)
                        continue;
 
-                   printf("Client %ld connesso\n", connfd);
+                   //printf("Client %ld connesso\n", connfd);
                    connected_clients++;
                    FD_SET(connfd, &set);
                    if (connfd > fdmax)
@@ -255,7 +252,7 @@ int main(int argc, char* argv[]) {
                //Leggo il codice operazione
                if (readn(connfd, &opcode, sizeof(int)) <= 0) {
                    //Se c'è un errore nella lettura chiudo la connessione con il client
-                   printf("Client %ld disconnesso\n", connfd);
+                   //printf("Client %ld disconnesso\n", connfd);
                    connected_clients--;
                    FD_CLR(connfd, &set);
                    close((int)connfd);
@@ -263,15 +260,9 @@ int main(int argc, char* argv[]) {
                        exit(EXIT_FAILURE);
                    continue;
                }
-               //Se è una SHUTDOWN del server
-               if (opcode == SHUTDOWN) {
-                   FD_CLR(connfd, &set);
-                   close((int)connfd);
-                   goto cleanup;
-               }
 
                //Creo una nuova richiesta
-               req = (request_t *) malloc(sizeof(request_t));
+               req = (request_t *)malloc(sizeof(request_t));
                if(req == NULL){
                    perror("Errore fatale malloc");
                    exit(EXIT_FAILURE);
@@ -299,9 +290,7 @@ int main(int argc, char* argv[]) {
        }
      }
 
-     //FASE FINALE DI CLEANUP
      cleanup:
-    if(errno != 0) perror("Info sull'errore");
     if(workers)
         destroyThreadPool(workers, 1);
      if(myStorage)
@@ -347,13 +336,13 @@ static void signals_checker(void* arg){
        case SIGQUIT:
            NO_MORE_CONNECTIONS = true;
            NO_MORE_REQUESTS = true;
-           printf("Terminazione immediata\n");
+           printf("\nTerminazione immediata\n");
            break;
 
        case SIGHUP:
            NO_MORE_CONNECTIONS = true;
            NO_MORE_REQUESTS = false;
-           printf("Terminazione in corso ... in attesa che tutti i client si disconnettano\n");
+           printf("\nTerminazione in corso ... in attesa che tutti i client si disconnettano\n");
            break;
 
        case SIGPIPE:
@@ -363,7 +352,7 @@ static void signals_checker(void* arg){
    }
    char msg[10] = "wake up!";
    if (write(signal_pipe[1], msg, sizeof(msg)) <= 0) {
-       perror("Errore scrittura pipe\n");
+       perror("\nErrore scrittura pipe\n");
        exit(FATAL);
    }
 }
@@ -480,7 +469,6 @@ int read_line(char *line, char* NOME_SOCKET, char* LOGFILE, int* NUMERO_WORKERS,
     }
 
     //Imposta politica di rimpiazzamento
-    //TODO controllare i '\n' e decidere cosa fare
     if (strcmp(token, "REPLACE_MODE") == 0) {
         token = strtok_r(NULL, "=", &tmpstr);
         if (!token || *token == '\n') {
@@ -538,6 +526,7 @@ int read_config_file(char* config_filename, char* NOME_SOCKET, char* LOGFILE, in
     return 0;
 }
 
+/* Funzione che stampa nel file di Log*/
 int main_write_logfile(FILE* logfile, pthread_mutex_t* mutex, const char* OP, int IDCLIENT, unsigned int DELETED_BYTES, unsigned int ADDED_BYTES,
                   unsigned int SENT_BYTES, const char* OBJECT_FILE, const char* OUTCOME){
 

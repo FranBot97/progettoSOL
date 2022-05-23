@@ -1,22 +1,9 @@
-//
-// Created by linuxlite on 21/02/22.
-//
-#include "../includes/storage.h"
-#include "../includes/icl_hash.h"
+#include <storage.h>
 #include <stdlib.h>
-#include "../includes/list.h"
 #include <string.h>
 #include <errno.h>
 #include <stdbool.h>
-#include "../includes/util.h"
-#include "../includes/request.h"
-int compareInt(void* a, void* b){
-    if(*(int*)a == *(int*)b)
-        return 0;
-    else
-        return -1;
-}
-//TODO vedere come gestire errori lock/unlock fatali ?
+#include <request.h>
 
 void file_destroy(file_t *myfile){
 
@@ -43,7 +30,6 @@ void file_destroy(file_t *myfile){
     }
 }
 
-//Sets errno malloc
 storage_t* storage_create(int files_limit, unsigned long long memory_limit, int replace_mode){
 
     //Errore: "max_file" e "max_memoria" non possono essere <= 0
@@ -60,6 +46,7 @@ storage_t* storage_create(int files_limit, unsigned long long memory_limit, int 
     storage_return->max_files_number = 0;
     storage_return->max_occupied_memory = 0;
     storage_return->times_replacement_algorithm = 0;
+    storage_return->replace_mode = replace_mode;
     storage_return->mutex = rwlock_init();
     if(storage_return->mutex == NULL)
         return NULL;
@@ -81,14 +68,21 @@ storage_t* storage_create(int files_limit, unsigned long long memory_limit, int 
     return storage_return;
 }
 
-//TODO vedere quando fare la lock
 void storage_destroy(storage_t* storage){
 
     if(!storage)
         return;
 
+    if (rwlock_writerLock(storage->mutex) != 0) return;
+
     //prima di eliminarlo stampa le statistiche
     storage_printStats(storage);
+
+    // Chiudo tutte le connessioni dei client che aspettavano una unlock
+    for(int i=0; i < MAX_CONN; i++){
+        int client = storage->clients_waiting_lock[i];
+        if(client != -1) close(client);
+    }
 
     if(storage->files != NULL) {
         icl_hash_destroy(storage->files, free, (void (*)(void *)) file_destroy);
@@ -111,6 +105,8 @@ void storage_destroy(storage_t* storage){
     }
 
 }
+
+// Operazioni sui file //
 
 //I file vuoti appena inseriti non causano nè subiscono espulsione
 //poiché sono visti come file di peso pari a 0.
@@ -145,11 +141,13 @@ int storage_openFile(storage_t* storage, char* filename, int flags, int client){
         snprintf(client_str, MAX_STRLEN, "%d", client);
         unsigned long client_strlen = strlen(client_str);
         char* client_mal = (char*)malloc( client_strlen*sizeof(char)+1);
+        if(client_mal == NULL) return FATAL;
         client_mal[client_strlen] = '\0';
         strcpy(client_mal,client_str);
 
         list_append(newFile->who_opened, client_mal);
         newFile->filename = (char*)malloc(strlen(filename)*sizeof(char)+1);
+        if(newFile->filename == NULL) return FATAL;
         strcpy(newFile->filename, filename);
         //Se è settato anche il flag di lock lo assegno al client
         if(flags & O_LOCK)
@@ -179,7 +177,7 @@ int storage_openFile(storage_t* storage, char* filename, int flags, int client){
     if (rwlock_writerLock(toOpen->mutex) != 0) return FATAL;
     if (rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
 
-    if(flags & O_LOCK){ //TODO da cambiare deve agire come la lockfile?
+    if(flags & O_LOCK){
         //Se c'è il flag O_LOCK settato controllo se è possibile fare la lock del file
         if(toOpen->client_locker == -1 || toOpen->client_locker == client){
             toOpen->client_locker = client; //Imposto il proprietario
@@ -207,6 +205,132 @@ int storage_openFile(storage_t* storage, char* filename, int flags, int client){
     return SUCCESS;
 }
 
+long long storage_readFile(storage_t* storage, char* filename, int client, void** buf){
+
+    if(!storage || !filename || !buf){
+        errno = EINVAL;
+        return 0;
+    }
+
+    //Prendo la readerLock sullo storage
+    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
+    //Cerco se è presente il file
+    file_t* toRead;
+    if( (toRead = icl_hash_find(storage->files, filename)) == NULL){
+        if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
+        return 0;
+    }
+    //Prendo la readerLock sul file e rilascio quella sullo storage
+    if(rwlock_readerLock(toRead->mutex) != 0) return FATAL;
+    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+    //Controllo che il client abbia aperto il file
+    char client_str[MAX_STRLEN];
+    snprintf(client_str, MAX_STRLEN, "%d", client);
+    if(list_get_elem(toRead->who_opened, client_str, (void*) strcmp ) == NULL){
+        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
+        errno = EPERM;
+        return FAILURE;
+    }
+    //Il client ha aperto il file
+    //Controllo che il file sia unlocked oppure locked dal client che ha chiesto la read
+    if(toRead->client_locker == client || toRead->client_locker == -1){
+
+        //Posso leggere il file solo se il contenuto è > 0
+        if(toRead->size == 0){
+            if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
+            errno = ENODATA;
+            return FAILURE;
+        }
+
+        //Memorizzo il contenuto del file nel buffer e restituisco la quantità di bytes
+        *buf = malloc(toRead->size);
+        if(!*buf) return FATAL;
+        memcpy(*buf, toRead->content, toRead->size);
+        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
+        return toRead->size;
+    }else{
+        //il file appartiene ad un altro client, non si può leggere
+        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
+        errno = EACCES;
+        return FAILURE;
+    }
+}
+
+//Legge solo i file con contenuto e non locked, i file vuoti non vengono considerati
+int storage_readNFiles(storage_t* storage, int client, int N, list_t** files_to_send){
+
+    if(!storage || !files_to_send){
+        errno = EINVAL;
+        return FAILURE;
+    }
+    errno = 0;
+    int count_files = 0;
+    *files_to_send = NULL;
+    //Dato che devo leggere tutti i file entro in lettura
+    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
+    if(N > storage->files_number || N<=0) N = storage->files_number;
+    //Per ogni nome di file nella lista dello storage vado a prendere il corrispondente
+    //file dalla tabella e lo aggiungo alla lista files_to_send
+    elem_t* elem = list_get_head(storage->filenames_queue);
+    if(!elem) goto cleanup; //non ci sono file con contenuto nello storage
+    while(count_files < N){
+        if(*files_to_send == NULL) *files_to_send = list_create();
+        if(!files_to_send) return FATAL;
+        //Cerco il file nello storage
+        file_t* file_to_copy = icl_hash_find(storage->files, elem->content);
+        file_t* file = NULL;
+        if(file_to_copy){
+            //se il file esiste ne prendo la readerLock
+            if(rwlock_readerLock(file_to_copy->mutex) != 0) return FATAL;
+            //Se il file è locked dal client che chiede la lettura o è libero allora posso leggerlo
+            if(file_to_copy->client_locker == -1 || file_to_copy->client_locker == client){
+                //lo leggo
+                // Creo il file di copia
+                file = (file_t*)malloc(sizeof(file_t));
+                if(file == NULL) return FATAL;
+                memset(file, 0, sizeof(file_t));
+                if(!file) return FATAL;
+                //oscuro i dati non rilevanti
+                file->mutex = NULL; file->client_locker = -1; file->who_opened = NULL;
+                //Alloco lo spazio
+                file->size = file_to_copy->size;
+                file->content = malloc(file_to_copy->size);
+                if(!file->content) return FATAL;
+                file->filename = malloc(strlen(file_to_copy->filename)*sizeof(char)+1);
+                if(!file->filename) return FATAL;
+                //Copio il contenuto
+                memcpy(file->content, file_to_copy->content, file_to_copy->size);
+                memcpy(file->filename, file_to_copy->filename, strlen(file_to_copy->filename)+1);
+                //Aggiungo il file alla lista
+                if( list_append(*files_to_send, file) == NULL) {
+                    int errno_copy = errno;
+                    if(rwlock_readerUnlock(file_to_copy->mutex) != 0) return FATAL;
+                    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+                    //problema con la lista, fallisco per il client
+                    file_destroy(file);
+                    list_destroy(*files_to_send, (void (*)(void *)) file_destroy);
+                    errno = errno_copy;
+                    return FAILURE;
+                }
+                count_files++;
+            }
+            //Rilascio readerLock
+            if(rwlock_readerUnlock(file_to_copy->mutex) != 0) return FATAL;
+        }else{
+            //il file non esiste nello storage ma esiste nella lista dei file,
+            //inconsistenza non grave, segnalo ma vado avanti
+            fprintf(stderr, "Il file %s compare nella lista ma non nello storage\n", (char*)elem->content);
+        }
+        elem = list_getNext(storage->filenames_queue, elem);
+        if(!elem) break; //Se è NULL allora ho esaminato tutti i file del server e esco prima
+    }
+    cleanup:
+    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
+    return count_files;
+
+}
+
 int storage_writeFile(storage_t* storage, const char* filename, size_t file_size, void* file_data, int client, list_t** list){
 
     if(!storage || !filename || !file_data || file_size <= 0 || !list){
@@ -220,8 +344,8 @@ int storage_writeFile(storage_t* storage, const char* filename, size_t file_size
     file_t* toWrite = NULL;
     if ( (toWrite = icl_hash_find(storage->files, (void*)filename)) == NULL){
         //Se il file non esiste
-        errno = ENOENT;
         if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
+        errno = ENOENT;
         return FAILURE;
     }
     //Se esiste prendo la writerLock
@@ -247,7 +371,7 @@ int storage_writeFile(storage_t* storage, const char* filename, size_t file_size
         //il client non ha aperto il file
         if(rwlock_writerUnlock(toWrite->mutex) != 0) return FATAL;
         if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
-        errno = EPERM;
+        errno = EACCES;
         return FAILURE;
     }
     //il client ha aperto il file, controllo sia anche il locker
@@ -269,18 +393,13 @@ int storage_writeFile(storage_t* storage, const char* filename, size_t file_size
     //prendo il nome del primo file da eliminare (FIFO)
     elem_t *elem = list_remove_head(storage->filenames_queue);
     if(elem == NULL) //Se sono arrivato qua e non ho file da liberare significa che c'è un errore di inconsistenza dello storage
-        { return FATAL;
-            /*if(rwlock_writerUnlock(toWrite->mutex) != 0) return FATAL;
-            if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
-            errno = ENOMEM;
-            return FAILURE;*/
-        }
+        {   errno = ENOTRECOVERABLE;
+            return FATAL;}
 
     char *exp_file_name = elem->content;
     //Vado a cercarlo nello storage
     file_t *toExp = icl_hash_find(storage->files, exp_file_name);
     if (toExp == NULL){ //se il file non c'è più lo ignoro
-        printf("DEBUG: FILE NON PRESENTE ANCHE SE NOME NELLA LISTA\n");
         continue;
     }
 
@@ -327,9 +446,11 @@ int storage_writeFile(storage_t* storage, const char* filename, size_t file_size
     //Modifico lo storage:
     //aggiungo il nome del file alla coda
     char* filename_copy = malloc(strlen(filename)*sizeof(char)+1);
+    if(filename_copy == NULL) return FATAL;
     filename_copy[strlen(filename)] = '\0';
     strcpy(filename_copy, filename);
-    list_append(storage->filenames_queue, filename_copy);
+    if (list_append(storage->filenames_queue, filename_copy) == NULL)
+        return FATAL;
     //modifico variabili dello storage
     storage->occupied_memory += file_size;
     storage->files_number++;
@@ -390,14 +511,15 @@ int storage_appendToFile(storage_t* storage, char* filename, size_t size, void* 
             //prendo il nome del primo file da eliminare (FIFO)
             //Vado a rimuovere dalla lista il primo elemento diverso dal file che devo scrivere
             elem_t *elem = list_remove_elem(storage->filenames_queue, toAppend->filename,(int (*)(void *, void *))(string_compare));
-            //elem_t *elem = list_remove_head(storage->filenames_queue);
-            if(elem == NULL) //Se sono arrivato qua e non ho file da liberare significa che c'è un errore di inconsistenza dello storage
+            if(elem == NULL){
+                //Se sono arrivato qua e non ho file da liberare significa che c'è un errore di inconsistenza dello storage
+                errno = ENOTRECOVERABLE;
                 return FATAL;
+            }
             char *exp_file_name = elem->content;
             //Vado a cercarlo nello storage
             file_t *toExp = icl_hash_find(storage->files, exp_file_name);
             if (toExp == NULL){ //se il file non c'è più lo ignoro
-                printf("DEBUG: FILE NON PRESENTE ANCHE SE NOME NELLA LISTA\n");
                 continue;
             }
 
@@ -458,129 +580,6 @@ int storage_appendToFile(storage_t* storage, char* filename, size_t size, void* 
     if(rwlock_writerUnlock(toAppend->mutex) != 0) return FATAL;
     if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
     return SUCCESS;
-}
-
-long long storage_readFile(storage_t* storage, char* filename, int client, void** buf){
-
-    if(!storage || !filename || !buf){
-        errno = EINVAL;
-        return FAILURE;
-    }
-
-    //Prendo la readerLock sullo storage
-    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
-    //Cerco se è presente il file
-    file_t* toRead;
-    if( (toRead = icl_hash_find(storage->files, filename)) == NULL){
-        if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
-        errno = ENOENT;
-        return FAILURE;
-    }
-    //Prendo la readerLock sul file e rilascio quella sullo storage
-    if(rwlock_readerLock(toRead->mutex) != 0) return FATAL;
-    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
-    //Controllo che il client abbia aperto il file
-    char client_str[MAX_STRLEN];
-    snprintf(client_str, MAX_STRLEN, "%d", client);
-    if(list_get_elem(toRead->who_opened, client_str, (void*) strcmp ) == NULL){
-        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        errno = EPERM;
-        return FAILURE;
-    }
-    //Il client ha aperto il file
-    //Controllo che il file sia unlocked oppure locked dal client che ha chiesto la read
-    if(toRead->client_locker == client || toRead->client_locker == -1){
-
-        //Posso leggere il file solo se il contenuto è > 0
-        if(toRead->size == 0){
-            if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-            errno = ENODATA;
-            return FAILURE;
-        }
-
-        //Memorizzo il contenuto del file nel buffer e restituisco la quantità di bytes
-        *buf = malloc(toRead->size);
-        if(!*buf) return FATAL;
-        memcpy(*buf, toRead->content, toRead->size);
-        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        return toRead->size;
-    }else{
-        //il file appartiene ad un altro client, non si può leggere
-        if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        errno = EACCES;
-        return FAILURE;
-    }
-}
-
-//Legge solo i file con contenuto, i file vuoti non vengono considerati
-int storage_readNFiles(storage_t* storage, int client, int N, list_t** files_to_send){
-
-    if(!storage || !files_to_send){
-        errno = EINVAL;
-        return -1;
-    }
-    errno = 0;
-    int count_files = 0;
-    *files_to_send = NULL;
-    //Dato che devo leggere tutti i file entro in lettura
-    if(rwlock_readerLock(storage->mutex) != 0) return FATAL;
-    if(N > storage->files_number || N<=0) N = storage->files_number;
-    //Per ogni nome di file nella lista dello storage vado a prendere il corrispondente
-    //file dalla tabella e lo aggiungo alla lista files_to_send
-    elem_t* elem = list_get_head(storage->filenames_queue);
-    if(!elem) goto cleanup; //non ci sono file con contenuto nello storage
-    while(count_files < N){
-        if(*files_to_send == NULL) *files_to_send = list_create();
-        if(!files_to_send) return FATAL;
-        //Cerco il file nello storage
-        file_t* file_to_copy = icl_hash_find(storage->files, elem->content);
-        file_t* file = NULL;
-        if(file_to_copy){
-            //se il file esiste ne prendo la readerLock
-            if(rwlock_readerLock(file_to_copy->mutex) != 0) return FATAL;
-            //Se il file è locked dal client che chiede la lettura o è libero allora posso leggerlo
-            if(file_to_copy->client_locker == -1 || file_to_copy->client_locker == client){
-                //lo leggo
-                // Creo il file di copia
-                file = (file_t*)malloc(sizeof(file_t));
-                memset(file, 0, sizeof(file_t));
-                if(!file) return FATAL;
-                //oscuro i dati non rilevanti
-                file->mutex = NULL; file->client_locker = -1; file->who_opened = NULL;
-                //Alloco lo spazio
-                file->size = file_to_copy->size;
-                file->content = malloc(file_to_copy->size);
-                if(!file->content) return FATAL;
-                file->filename = malloc(strlen(file_to_copy->filename)*sizeof(char)+1);
-                if(!file->filename) return FATAL;
-                //Copio il contenuto
-                memcpy(file->content, file_to_copy->content, file_to_copy->size);
-                memcpy(file->filename, file_to_copy->filename, strlen(file_to_copy->filename)+1);
-                //Aggiungo il file alla lista
-                if( list_append(*files_to_send, file) == NULL) {
-                    if(rwlock_readerUnlock(file_to_copy->mutex) != 0) return FATAL;
-                    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
-                    //problema con la lista, fallisco per il client
-                    file_destroy(file);
-                    list_destroy(*files_to_send, (void (*)(void *)) file_destroy);
-                    return FAILURE;
-                }
-                count_files++;
-            }
-            //Rilascio readerLock
-            if(rwlock_readerUnlock(file_to_copy->mutex) != 0) return FATAL;
-        }else{
-            //il file non esiste nello storage ma esiste nella lista dei file,
-            //inconsistenza non grave, segnalo ma vado avanti
-            fprintf(stderr, "Il file %s compare nella lista ma non nello storage\n", (char*)elem->content);
-        }
-        elem = list_getNext(storage->filenames_queue, elem);
-        if(!elem) break; //Se è NULL allora ho esaminato tutti i file del server e esco prima
-    }
-    cleanup:
-    if(rwlock_readerUnlock(storage->mutex) != 0) return FATAL;
-    return count_files;
-
 }
 
 int storage_lockFile(storage_t* storage, char* filename, int client){
@@ -681,6 +680,7 @@ int storage_unlockFile(storage_t* storage, const char* filename, int client){
         return FAILURE;
     }
 
+    //inutilizzato
     return FAILURE;
 }
 
@@ -688,7 +688,7 @@ int storage_closeFile(storage_t* storage, char* filename, int client){
 
     if(!storage || !filename){
         errno = EINVAL;
-        return -1;
+        return FAILURE;
     }
 
     if(rwlock_readerLock(storage->mutex) != 0 ) return FATAL;
@@ -725,7 +725,7 @@ int storage_removeFile(storage_t* storage, char* filename, int client, unsigned 
 
     if(!storage || !filename){
         errno = EINVAL;
-        return -1;
+        return FAILURE;
     }
 
     //Dato che vado a modificare la struttura dello storage entro come scrittore
@@ -763,13 +763,12 @@ int storage_removeFile(storage_t* storage, char* filename, int client, unsigned 
     }else{//Il client non è il locker
         if(rwlock_writerUnlock(toRemove->mutex) != 0) return FATAL;
         if(rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
-        errno = EACCES;
+        errno = EPERM;
         return FAILURE;
     }
-
 }
 
-/**** FUNZIONI AGGIUNTIVE ****/
+// Funzioni di supporto //
 
 int storage_addClientWaiting(storage_t* storage, int client){
 
@@ -790,8 +789,11 @@ int storage_addClientWaiting(storage_t* storage, int client){
     }
     if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
 
-    if(i == MAX_CONN) //significa che non ho trovato spazio per aggiungere il client
+    if(i == MAX_CONN){
+        //significa che non ho trovato spazio per aggiungere il client
+        errno = EUSERS;
         return FAILURE;
+    }
 
     return SUCCESS;
 }
@@ -814,13 +816,14 @@ int storage_removeClientWaiting(storage_t* storage){
     }
     if (rwlock_writerUnlock(storage->mutex) != 0) return FATAL;
 
+    errno = ENODATA;
     return FAILURE;
 }
 
 int storage_printStats(storage_t* storage){
 
     if(!storage)
-        return -1;
+        return FAILURE;
 
     printf("\n=========== STATISTICHE FILE STORAGE ===============\n");
     printf("Numero massimo di file raggiunto: %d\n", storage->max_files_number);
@@ -831,6 +834,6 @@ int storage_printStats(storage_t* storage){
     printf("----------------------\n");
     printf("\n====================================================\n");
 
-    return 0;
+    return SUCCESS;
 
 }

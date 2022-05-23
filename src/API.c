@@ -1,5 +1,3 @@
-//TODO controlla strncpy strlen ecc.. e gli invii delle stringhe
-//TODO decidere se fare perror dentro API o fuori (meglio fuori per coerenza)
 #include <time.h>
 #include <stdbool.h>
 #include <list.h>
@@ -119,6 +117,7 @@ int closeConnection(const char* sockname){
     PRINT_INFO(print_info, "\n---------------------------------------------------------")
     return -1;
 }
+
 
 int openFile(const char* pathname, int flags){
 
@@ -252,8 +251,7 @@ int closeFile(const char* pathname){
 
     error:
     PRINT_INFO(print_info, "\n\n--- INFO OPERAZIONE --------------------------------------")
-    PRINT_INFO(print_info, "\ncloseFile: impossibile chiudere il file %s sul server.\n Info sull'errore: %s %s",filename, err_arg,
-               strerror(errno))
+    PRINT_INFO(print_info, "\ncloseFile: impossibile chiudere il file %s sul server.", filename)
     PRINT_INFO(print_info, "\n----------------------------------------------------------")
 
     return -1;
@@ -420,7 +418,7 @@ int writeFile(const char* pathname, const char* dirname){
     PRINT_INFO(print_info, "\n\n--- INFO OPERAZIONE --------------------------------------")
     PRINT_INFO(print_info, "\nwriteFile: errore durante l'operazione di scrittura del file %s.\nInfo sull'errore: %s %s\n", pathname, err_arg,strerror(errno))
     if(done){  PRINT_INFO(print_info, "Scritti %ld bytes sul server,", file_size)}
-    PRINT_INFO(print_info, "ricevuti %ld bytes e salvati %ld bytes. ", received_bytes, stored_bytes)
+    if(done) {PRINT_INFO(print_info, "ricevuti %ld bytes e salvati %ld bytes. ", received_bytes, stored_bytes)}
     if(dir && (strcmp(ok_arg, "") != 0)) {
         PRINT_INFO(print_info, "\nFile memorizzati nella cartella %s:\n%s",
                                 dirname, ok_arg)
@@ -569,8 +567,8 @@ int appendToFile(const char* pathname, void* buf, size_t size, const char* dirna
     PRINT_INFO(print_info, "\n\n--- INFO OPERAZIONE --------------------------------------")
     PRINT_INFO(print_info, "\nappendToFile: errore durante l'operazione di scrittura in append al file %s.\nInfo sull'errore: %s %s\n", pathname, err_arg,
                strerror(errno))
-    if(done)  PRINT_INFO(print_info, "Scritti %ld bytes sul server", size)
-    PRINT_INFO(print_info, ", ricevuti %ld bytes e salvati %ld bytes. \n", received_bytes, stored_bytes)
+    if(done)  {PRINT_INFO(print_info, "Scritti %ld bytes sul server", size)}
+    if(done) {PRINT_INFO(print_info, ", ricevuti %ld bytes e salvati %ld bytes. \n", received_bytes, stored_bytes)}
     if(dir && (strcmp(ok_arg, "") != 0)) {
         PRINT_INFO(print_info, "\nFile memorizzati nella cartella %s:\n%s",
                                 dirname, ok_arg)
@@ -581,6 +579,7 @@ int appendToFile(const char* pathname, void* buf, size_t size, const char* dirna
 
 int readFile(const char* pathname, void** buf, size_t* size){
     char err_arg[ERROR_STRLEN] = "";
+    //int errno_copy = 0;
 
     if(!connected){
         errno = ENOTCONN;
@@ -618,29 +617,30 @@ int readFile(const char* pathname, void** buf, size_t* size){
     if (writen(socket_fd, filename, filename_len) <= 0)  goto error;
     filename[filename_len] = '\0';
 
-    //Aspetto il responso, nell'ordine: dimensione del file letto e contenuto
-    if (readn(socket_fd, size, sizeof(long long)) <= 0)  goto error;
-    int errno_copy = 0;
-    if(*size == 0){
-        errno = ENODATA;
+    //Aspetto il responso, nell'ordine: responso, dimensione del file letto e contenuto
+    int response = 0;
+    if (readn(socket_fd, &response, sizeof(int)) <= 0)  goto error;
+    if(response == 0){
+        //leggo errno e esco
+        if (readn(socket_fd, &errno, sizeof(int)) <= 0)  goto error;
         goto error;
     }
+    //Leggo dimensione del file letto
+    if (readn(socket_fd, size, sizeof(size_t)) <= 0)  goto error;
     *buf = malloc(*size); if(!buf)  goto error;
-    if (readn(socket_fd, *buf, *size) <= 0) goto error;
+    if (readn(socket_fd, *buf, *size) <= 0) return -1;
     PRINT_INFO(print_info, "\n\n--- INFO OPERAZIONE --------------------------------------")
     PRINT_INFO(print_info, "\nreadFile: file %s letto correttamente dal server, %ld bytes memorizzati nel parametro 'buf'", filename, *size)
     PRINT_INFO(print_info, "\n----------------------------------------------------------")
     return 0;
 
     error:
-    if (writen(socket_fd, &errno_copy, sizeof(int)) <= 0)  goto error;
     PRINT_INFO(print_info, "\n\n--- INFO OPERAZIONE --------------------------------------")
-    PRINT_INFO(print_info, "\nreadFile: errore durante la lettura del file %s dal server.\nInfo sull'errore: %s %s", filename, err_arg, strerror(errno_copy))
+    PRINT_INFO(print_info, "\nreadFile: errore durante la lettura del file %s dal server.\nInfo sull'errore: %s %s", filename, err_arg, strerror(errno))
     PRINT_INFO(print_info, "\n----------------------------------------------------------")
     return -1;
 }
 
-//-1 in caso di errore, >=0 OK
 int readNFiles(int N, const char* dirname){
 
     char err_arg[ERROR_STRLEN] = "";
