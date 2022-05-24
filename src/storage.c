@@ -229,7 +229,7 @@ long long storage_readFile(storage_t* storage, char* filename, int client, void*
     snprintf(client_str, MAX_STRLEN, "%d", client);
     if(list_get_elem(toRead->who_opened, client_str, (void*) strcmp ) == NULL){
         if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        errno = EPERM;
+        errno = EACCESS;
         return FAILURE;
     }
     //Il client ha aperto il file
@@ -253,7 +253,7 @@ long long storage_readFile(storage_t* storage, char* filename, int client, void*
     }else{
         //il file appartiene ad un altro client, non si può leggere
         if(rwlock_readerUnlock(toRead->mutex) != 0) return FATAL;
-        errno = EACCES;
+        errno = EPERM;
         return FAILURE;
     }
 }
