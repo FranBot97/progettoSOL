@@ -283,8 +283,8 @@ int main(int argc, char* argv[]) {
                         if (readFile(filepath, &buf, &size) == 0 && set_dir) {
                             char filename_parsed[MAX_FILENAME];
                             parseFilename(filepath, filename_parsed);
-                            char complete_pathname[MAX_PATH * 2];
-                            if (dirname[strlen(dirname)] != '/') strcat(dirname, "/");
+                            char complete_pathname[MAX_PATH * 2]="";
+                            if (dirname[strlen(dirname)-1] != '/') strcat(dirname, "/");
                             strcat(complete_pathname, dirname);
                             strcat(complete_pathname, filename_parsed);
 
